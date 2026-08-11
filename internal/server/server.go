@@ -22,6 +22,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"icloud-hme/internal/account"
 	"icloud-hme/internal/auth"
+	"icloud-hme/internal/hme"
 	"icloud-hme/internal/webui"
 )
 
@@ -31,15 +32,19 @@ type Config struct {
 	AdminPassword string
 	SessionTTL    time.Duration
 	SecureCookie  bool
+	// PublicLinkSecret 用于签名每个隐藏邮箱的独立取件 URL。
+	// 生产环境由数据目录中的随机密钥文件提供。
+	PublicLinkSecret []byte
 }
 
 // Server 封装 Gin 引擎、账号后端与认证。
 type Server struct {
-	be      Backend
-	auth    *auth.Manager
-	limiter *auth.Limiter
-	cfg     Config
-	r       *gin.Engine
+	be               Backend
+	auth             *auth.Manager
+	limiter          *auth.Limiter
+	cfg              Config
+	publicLinkSecret []byte
+	r                *gin.Engine
 }
 
 // New 创建 Server。mgr 为账号管理器,cfg 为安全配置。
@@ -63,6 +68,7 @@ func newWithBackend(be Backend, cfg Config) *Server {
 		limiter: auth.NewLimiter(nil, 15*time.Minute, 5, 10000),
 		cfg:     cfg,
 	}
+	s.publicLinkSecret = normalizePublicLinkSecret(cfg.PublicLinkSecret, cfg.AdminPassword)
 	s.auth, _ = auth.NewManager(auth.Options{
 		Password: cfg.AdminPassword,
 		TTL:      cfg.SessionTTL,
@@ -90,6 +96,8 @@ func (s *Server) register() {
 		// ===== 认证(公开) =====
 		api.POST("/auth/login", s.handleLogin)
 		api.GET("/auth/session", s.handleSession)
+		// 公开取件链接使用高强度签名 token，不依赖管理员会话。
+		api.GET("/public/mail/:token", s.publicInboxHandler)
 
 		// ===== 受保护路由:统一 requireSession =====
 		authed := api.Group("")
@@ -109,6 +117,7 @@ func (s *Server) register() {
 
 			// ===== 核心接口 1: 创建邮箱 =====
 			authed.POST("/create", csrfCheck(s.auth), s.createAliasHandler)
+			authed.POST("/create-batch", csrfCheck(s.auth), s.createAliasesHandler)
 
 			// ===== 核心接口 2: 读取邮件 =====
 			authed.GET("/inbox", s.listInboxHandler)
@@ -175,12 +184,69 @@ func (s *Server) createAliasHandler(c *gin.Context) {
 		backendFail(c, err)
 		return
 	}
-	ok(c, gin.H{
+	ok(c, s.createdAliasPayload(req.AccountID, *result))
+}
+
+type createAliasesReq struct {
+	AccountID   string `json:"account_id"`
+	Count       int    `json:"count"`
+	LabelPrefix string `json:"label_prefix"`
+}
+
+// createAliasesHandler 顺序创建最多 20 个邮箱。上游在中途失败时返回已经
+// 成功创建的结果，避免用户误以为这些不可回滚的别名没有创建。
+func (s *Server) createAliasesHandler(c *gin.Context) {
+	var req createAliasesReq
+	if err := c.ShouldBindJSON(&req); err != nil || req.AccountID == "" {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: account_id 必填")
+		return
+	}
+	if req.Count == 0 {
+		req.Count = 20
+	}
+	if req.Count < 1 || req.Count > 20 {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: count 需为 1-20 的整数")
+		return
+	}
+	req.LabelPrefix = strings.TrimSpace(req.LabelPrefix)
+	if req.LabelPrefix == "" {
+		req.LabelPrefix = "批量邮箱-" + time.Now().Format("20060102-150405")
+	}
+	if len([]rune(req.LabelPrefix)) > 190 {
+		failCode(c, http.StatusBadRequest, "VALIDATION_ERROR", "参数错误: label_prefix 最长 190 字符")
+		return
+	}
+
+	results, err := s.be.CreateAliases(req.AccountID, req.LabelPrefix, req.Count)
+	if err != nil && len(results) == 0 {
+		backendFail(c, err)
+		return
+	}
+	aliases := make([]gin.H, 0, len(results))
+	for _, result := range results {
+		aliases = append(aliases, s.createdAliasPayload(req.AccountID, result))
+	}
+	complete := err == nil && len(results) == req.Count
+	data := gin.H{
+		"requested": req.Count,
+		"created":   len(results),
+		"complete":  complete,
+		"aliases":   aliases,
+	}
+	if !complete {
+		data["message"] = "已保留成功创建的邮箱，后续创建被上游中断"
+	}
+	ok(c, data)
+}
+
+func (s *Server) createdAliasPayload(accountID string, result hme.CreateResult) gin.H {
+	return gin.H{
 		"email":      result.Email,
 		"label":      result.Label,
 		"created_at": result.CreatedAt,
-		"account_id": req.AccountID,
-	})
+		"account_id": accountID,
+		"inbox_url":  s.publicInboxPath(accountID, result.Email),
+	}
 }
 
 // ====================================================================
@@ -250,6 +316,9 @@ func (s *Server) listAliasesHandler(c *gin.Context) {
 	if err != nil {
 		backendFail(c, err)
 		return
+	}
+	for i := range aliases {
+		aliases[i].InboxURL = s.publicInboxPath(accountID, aliases[i].Email)
 	}
 	ok(c, gin.H{
 		"account_id": accountID,

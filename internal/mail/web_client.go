@@ -6,9 +6,11 @@ package mail
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +22,10 @@ import (
 
 // WebClientBuildNumber 是与浏览器一致的 mccgateway 邮件接口构建号。
 const WebClientBuildNumber = "2624Build13"
+
+// ErrRecipientFilterUnavailable 表示 iCloud Web 的 THREAD_DIGEST 响应没有
+// 真实收件人字段，不能据此安全地把邮件归属到某一个隐藏邮箱别名。
+var ErrRecipientFilterUnavailable = errors.New("iCloud Web 邮件摘要不支持可靠的收件人筛选")
 
 // WebClient 是 iCloud Web 邮件客户端。
 type WebClient struct {
@@ -94,21 +100,110 @@ func (c *WebClient) setCommonHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", c.origin())
 	req.Header.Set("Referer", c.origin()+"/")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
+	req.Header.Set("sec-ch-ua", `"Google Chrome";v="147", "Not.A/Brand";v="8", "Chromium";v="147"`)
+	req.Header.Set("sec-ch-ua-mobile", "?0")
+	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
 	req.Header.Set("Sec-Fetch-Dest", "empty")
 	req.Header.Set("Sec-Fetch-Mode", "cors")
 	req.Header.Set("Sec-Fetch-Site", "same-site")
+	if cookieHeader := c.cookieHeader(); cookieHeader != "" {
+		req.Header.Set("Cookie", cookieHeader)
+	}
 }
 
-// withParams 给 URL 追加 clientBuildNumber / clientId / dsid 查询参数。
-func (c *WebClient) withParams(rawURL string) string {
+// cookieHeader 保留浏览器导出 Cookie 的引号形式并在每个动态分区域请求上
+// 显式携带。iCloud 的 validate/mccgateway 会返回动态主机，只预先向固定
+// p217 CookieJar 写入 Cookie 会在实际 pXX 主机上丢失会话。
+func (c *WebClient) cookieHeader() string {
+	if len(c.cookies) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(c.cookies))
+	for key := range c.cookies {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		// 直接沿用浏览器导出的 Cookie 值：只有值本身带双引号时才
+		// 保留双引号，不能把普通值统一改成带引号格式。
+		parts = append(parts, key+"="+c.cookies[key])
+	}
+	return strings.Join(parts, "; ")
+}
+
+// absorbResponseCookies 保存 Apple 在 validate/accountLogin 中刷新的会话
+// Cookie，后续跨动态 mccgateway 主机的显式 Cookie 头也会使用这些新值。
+func (c *WebClient) absorbResponseCookies(resp *http.Response) {
+	if c.cookies == nil {
+		c.cookies = make(map[string]string)
+	}
+	for _, cookie := range resp.Cookies() {
+		if cookie.Name != "" && cookie.Value != "" {
+			c.cookies[cookie.Name] = cookie.Value
+		}
+	}
+}
+
+// withParams 给 URL 追加 iCloud Web 必需查询参数。首次 validate 时
+// Apple 会根据 Cookie 解析 DSID，提前附加 dsid 会在中国区返回 HTTP 421。
+func (c *WebClient) withParams(rawURL string, includeDSID bool) string {
 	sep := "?"
 	if strings.Contains(rawURL, "?") {
 		sep = "&"
 	}
-	return fmt.Sprintf("%s%sclientBuildNumber=%s&clientMasteringNumber=%s&clientId=%s&dsid=%s",
-		rawURL, sep, WebClientBuildNumber, WebClientBuildNumber, c.clientID, c.dsid)
+	result := fmt.Sprintf("%s%sclientBuildNumber=%s&clientMasteringNumber=%s&clientId=%s",
+		rawURL, sep, WebClientBuildNumber, WebClientBuildNumber, c.clientID)
+	if includeDSID && c.dsid != "" {
+		result += "&dsid=" + url.QueryEscape(c.dsid)
+	}
+	return result
+}
+
+type setupResponse struct {
+	DsInfo struct {
+		Dsid string `json:"dsid"`
+	} `json:"dsInfo"`
+	Webservices struct {
+		Mccgateway struct {
+			URL string `json:"url"`
+		} `json:"mccgateway"`
+	} `json:"webservices"`
+}
+
+func normalizeServiceURL(rawURL string) string {
+	serviceURL := strings.TrimSpace(rawURL)
+	if serviceURL == "" {
+		return ""
+	}
+	if !strings.HasPrefix(serviceURL, "https://") {
+		serviceURL = "https://" + serviceURL
+	}
+	// Apple 有时返回 :443。去掉默认端口，避免 CookieJar 按不同 host
+	// 处理；显式 Cookie 头虽已兜底，但统一 URL 也便于后续请求。
+	if u, err := url.Parse(serviceURL); err == nil && u.Host != "" {
+		u.Host = u.Hostname()
+		serviceURL = u.String()
+	}
+	return strings.TrimRight(serviceURL, "/")
+}
+
+func (c *WebClient) applySetupResponse(body []byte) error {
+	var parsed setupResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return fmt.Errorf("解析 iCloud setup 响应失败: %w", err)
+	}
+	if parsed.DsInfo.Dsid != "" {
+		c.dsid = parsed.DsInfo.Dsid
+	}
+	c.mccGatewayURL = normalizeServiceURL(parsed.Webservices.Mccgateway.URL)
+	if c.mccGatewayURL == "" {
+		return fmt.Errorf("iCloud setup 响应缺少 mccgateway URL")
+	}
+	return nil
 }
 
 // resolveMccGateway 从 validate 响应中获取 mccgateway URL。
@@ -118,7 +213,7 @@ func (c *WebClient) resolveMccGateway() error {
 	}
 
 	setupURL := "https://setup." + c.host + "/setup/ws/1/validate"
-	req, err := http.NewRequest("POST", c.withParams(setupURL), nil)
+	req, err := http.NewRequest("POST", c.withParams(setupURL, false), nil)
 	if err != nil {
 		return err
 	}
@@ -131,36 +226,14 @@ func (c *WebClient) resolveMccGateway() error {
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("validate 失败: HTTP %d - %s", resp.StatusCode, truncate(string(body), 200))
+	c.absorbResponseCookies(resp)
+	if resp.StatusCode == http.StatusMisdirectedRequest {
+		return fmt.Errorf("iCloud Web Mail 会话已失效,请更新 Cookie 或配置 App 专用密码")
 	}
-
-	var parsed struct {
-		Webservices struct {
-			Mccgateway struct {
-				URL string `json:"url"`
-			} `json:"mccgateway"`
-		} `json:"webservices"`
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("validate 失败: HTTP %d", resp.StatusCode)
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return fmt.Errorf("解析 validate 响应失败: %w", err)
-	}
-
-	mccURL := parsed.Webservices.Mccgateway.URL
-	if mccURL == "" {
-		return fmt.Errorf("未找到 mccgateway URL,响应: %s", truncate(string(body), 200))
-	}
-	if !strings.HasPrefix(mccURL, "https://") {
-		mccURL = "https://" + mccURL
-	}
-	// 去掉端口号(如 :443)——tls-client 的 cookie jar 按不带端口的 host 存储 Cookie,
-	// 带端口的 URL 会导致 Cookie 无法附加,返回 403。
-	if u, err := url.Parse(mccURL); err == nil && u.Host != "" {
-		u.Host = u.Hostname()
-		mccURL = u.String()
-	}
-	c.mccGatewayURL = strings.TrimRight(mccURL, "/")
-	return nil
+	return c.applySetupResponse(body)
 }
 
 // threadSearchResp 是 thread/search 接口的响应结构。
@@ -181,7 +254,7 @@ func (c *WebClient) search(payload string) ([]Message, error) {
 		return nil, err
 	}
 
-	searchURL := c.withParams(c.mccGatewayURL + "/mailws2/v1/thread/search")
+	searchURL := c.withParams(c.mccGatewayURL+"/mailws2/v1/thread/search", true)
 	req, err := http.NewRequest("POST", searchURL, strings.NewReader(payload))
 	if err != nil {
 		return nil, err
@@ -243,31 +316,10 @@ func (c *WebClient) SearchMails(query string, limit int) ([]Message, error) {
 	return c.search(payload)
 }
 
-// FindByAlias 查找发给指定别名的邮件——在本地过滤(Web API 不支持收件人搜索)。
+// FindByAlias 不使用 THREAD_DIGEST 做别名取件。该响应没有 To 字段，而且
+// query 参数可能被上游忽略；把搜索结果标记成请求别名会混入其他邮箱邮件。
 func (c *WebClient) FindByAlias(alias string, limit int) ([]Message, error) {
-	// 拉取收件箱全部邮件(最多取 2*limit),本地过滤
-	batchSize := limit * 2
-	if batchSize < 50 {
-		batchSize = 50
-	}
-	raw, err := c.ListInbox(batchSize)
-	if err != nil {
-		return nil, err
-	}
-
-	// 本地过滤: To/CC/BCC 或主题中包含 alias
-	filtered := make([]Message, 0, limit)
-	for _, m := range raw {
-		if strings.Contains(strings.ToLower(m.Subject), strings.ToLower(alias)) ||
-			strings.Contains(strings.ToLower(m.From), strings.ToLower(alias)) ||
-			strings.Contains(strings.ToLower(m.To), strings.ToLower(alias)) {
-			filtered = append(filtered, m)
-			if len(filtered) >= limit {
-				break
-			}
-		}
-	}
-	return filtered, nil
+	return nil, ErrRecipientFilterUnavailable
 }
 
 func truncate(s string, n int) string {

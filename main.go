@@ -21,6 +21,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"flag"
 	"log"
 	"os"
@@ -61,12 +62,17 @@ func main() {
 	defer mgr.Close()
 	count := len(mgr.ListAccounts())
 	log.Printf("账号加载完成 count=%d data_dir=%s", count, abs)
+	publicLinkSecret, err := loadOrCreatePublicLinkSecret(filepath.Join(abs, "public_link.secret"))
+	if err != nil {
+		log.Fatalf("初始化取件链接密钥失败: %v", err)
+	}
 
 	srv, err := server.New(mgr, server.Config{
-		Debug:         *debug,
-		AdminPassword: adminPassword,
-		SessionTTL:    sessionTTL,
-		SecureCookie:  secureCookie,
+		Debug:            *debug,
+		AdminPassword:    adminPassword,
+		SessionTTL:       sessionTTL,
+		SecureCookie:     secureCookie,
+		PublicLinkSecret: publicLinkSecret,
 	})
 	if err != nil {
 		log.Fatalf("初始化服务失败: %v", err)
@@ -79,6 +85,22 @@ func main() {
 	if err := srv.Run(*addr); err != nil {
 		log.Fatalf("服务启动失败: %v", err)
 	}
+}
+
+// loadOrCreatePublicLinkSecret 为公开取件 URL 创建持久化随机密钥。
+// 密钥仅保存在数据目录，不进入日志、API 或前端。
+func loadOrCreatePublicLinkSecret(path string) ([]byte, error) {
+	if secret, err := os.ReadFile(path); err == nil && len(secret) >= 32 {
+		return secret, nil
+	}
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(path, secret, 0600); err != nil {
+		return nil, err
+	}
+	return secret, nil
 }
 
 // parseSessionTTL 解析会话有效期,默认 12h,范围 15m-168h。

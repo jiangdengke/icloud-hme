@@ -6,7 +6,7 @@ import AsyncState from '../components/AsyncState'
 import CreateAliasDialog from '../components/CreateAliasDialog'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast } from '../components/ToastProvider'
-import { IconCheck, IconClock, IconPlus, IconSearch, IconTrash } from '../components/icons'
+import { IconCheck, IconClock, IconCopy, IconPlus, IconSearch, IconTrash } from '../components/icons'
 
 function formatDate(raw: string): string {
   const d = new Date(raw)
@@ -121,6 +121,33 @@ export default function AliasesPage() {
     [show],
   )
 
+  const copyInboxURL = useCallback(
+    async (email: string, path: string) => {
+      const url = new URL(path, window.location.origin).href
+      const line = `${email}---${url}`
+      try {
+        await navigator.clipboard.writeText(line)
+        show('邮箱和取件链接已复制')
+      } catch {
+        show(`复制失败，请手动复制：${line}`)
+      }
+    },
+    [show],
+  )
+
+  const copyAllInboxURLs = useCallback(async () => {
+    const lines = filtered
+      .filter((alias) => alias.inboxUrl)
+      .map((alias) => `${alias.email}---${new URL(alias.inboxUrl ?? '', window.location.origin).href}`)
+    if (lines.length === 0) return
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'))
+      show(`已复制 ${lines.length} 个邮箱和取件链接`)
+    } catch {
+      show('批量复制失败，请重试')
+    }
+  }, [filtered, show])
+
   async function runAction(type: 'deactivate' | 'reactivate' | 'delete') {
     if (!confirm) return
     setBusy(true)
@@ -198,6 +225,14 @@ export default function AliasesPage() {
           <button className="primary" onClick={() => setCreateOpen(true)} disabled={!accountId}>
             <IconPlus size={16} />
             创建别名
+          </button>
+          <button
+            type="button"
+            onClick={() => void copyAllInboxURLs()}
+            disabled={!filtered.some((alias) => alias.inboxUrl)}
+          >
+            <IconCopy size={16} />
+            复制全部
           </button>
         </div>
       </div>
@@ -301,6 +336,20 @@ export default function AliasesPage() {
                           激活
                         </button>
                       )}
+                      {alias.inboxUrl && (
+                        <>
+                          <a href={alias.inboxUrl} target="_blank" rel="noreferrer">
+                            取件页
+                          </a>
+                          <button
+                            onClick={() => void copyInboxURL(alias.email, alias.inboxUrl ?? '')}
+                            title="复制邮箱和取件链接"
+                            aria-label={`复制 ${alias.email} 和取件链接`}
+                          >
+                            <IconCopy size={14} />
+                          </button>
+                        </>
+                      )}
                       <button
                         className="danger"
                         disabled={busy}
@@ -357,4 +406,3 @@ export default function AliasesPage() {
     </section>
   )
 }
-

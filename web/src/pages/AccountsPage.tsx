@@ -126,7 +126,7 @@ export default function AccountsPage() {
       <div className="page-header">
         <div className="page-title">
           <h2>账号管理</h2>
-          <p>管理 iCloud 账号、Cookie 与登录凭据</p>
+          <p>接入已有账号并管理登录凭据</p>
         </div>
         <button
           className="primary"
@@ -136,7 +136,7 @@ export default function AccountsPage() {
           }}
         >
           <IconPlus size={16} />
-          添加账号
+          接入账号
         </button>
       </div>
 
@@ -144,7 +144,7 @@ export default function AccountsPage() {
         loading={loading}
         error={error}
         empty={accounts.length === 0}
-        emptyText="暂无账号，点击“添加账号”开始"
+        emptyText="暂无账号，点击“接入账号”开始"
         onRetry={handleRetry}
       >
         <div className="table-wrap">
@@ -217,6 +217,7 @@ export default function AccountsPage() {
       </AsyncState>
 
       <AccountFormDialog
+        key={formOpen ? editing?.id ?? 'new' : 'closed'}
         open={formOpen}
         onClose={() => setFormOpen(false)}
         onSaved={() => {

@@ -35,6 +35,7 @@ export interface Alias {
   label: string
   active: boolean
   createdAt?: string
+  inboxUrl?: string
 }
 
 /** 邮件摘要 */

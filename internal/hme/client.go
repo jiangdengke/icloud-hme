@@ -57,6 +57,7 @@ type Alias struct {
 	Label       string `json:"label"`
 	Active      bool   `json:"active"`
 	CreatedAt   string `json:"createdAt,omitempty"`
+	InboxURL    string `json:"inboxUrl,omitempty"`
 }
 
 // Client 是 iCloud Hide My Email 客户端。
@@ -263,24 +264,23 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 		req.Header.Set("sec-ch-ua-platform", `"Windows"`)
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
 
-		// 手动添加 Cookie 头（确保跨域也能传递）
-		// 浏览器发送的 Cookie 值带双引号,iCloud 严格匹配
+		// 手动添加 Cookie 头（确保跨域也能传递）。沿用浏览器导出的
+		// 原始值；只有 Cookie 本身带双引号时才会包含双引号。
 		if len(c.Cookies) > 0 {
 			cookieParts := make([]string, 0, len(c.Cookies))
 			for k, v := range c.Cookies {
-				if strings.HasPrefix(v, `"`) {
-					cookieParts = append(cookieParts, k+"="+v)
-				} else {
-					cookieParts = append(cookieParts, k+`="`+v+`"`)
-				}
+				cookieParts = append(cookieParts, k+"="+v)
 			}
 			cookieHeader := strings.Join(cookieParts, "; ")
 			req.Header.Set("Cookie", cookieHeader)
 			if c.Verbose {
 				c.log(">>> URL: %s", fullURL)
-				c.log(">>> Cookie: %s", cookieHeader[:min(200, len(cookieHeader))])
+				c.log(">>> Cookie names: %d", len(cookieParts))
 				for k, vv := range req.Header {
 					for _, v := range vv {
+						if strings.EqualFold(k, "Cookie") {
+							continue
+						}
 						c.log(">>> %s: %s", k, v[:min(100, len(v))])
 					}
 				}
@@ -308,11 +308,9 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			snippet := string(text)
-			if len(snippet) > 200 {
-				snippet = snippet[:200]
-			}
-			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, snippet)
+			// setup 的错误体可能包含新的 trust token；错误链只保留状态码，
+			// 避免凭据进入日志或 API 响应。
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
 			// 401/403 说明 Cookie 失效,不重试直接返回。
 			if resp.StatusCode == 401 || resp.StatusCode == 403 {
 				return "", lastErr

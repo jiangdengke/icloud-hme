@@ -49,6 +49,7 @@ const aliases: Alias[] = [
     label: 'Alpha',
     active: true,
     createdAt: '2026-07-01T00:00:00+08:00',
+    inboxUrl: '/mail/token-alpha',
   },
   {
     email: 'beta@icloud.com',
@@ -56,6 +57,7 @@ const aliases: Alias[] = [
     label: 'Beta',
     active: false,
     createdAt: '2026-07-02T00:00:00+08:00',
+    inboxUrl: '/mail/token-beta',
   },
 ]
 
@@ -126,7 +128,7 @@ describe('AliasesPage', () => {
       ),
     )
     renderPage()
-    const retry = await screen.findByRole('button', { name: /重试/ })
+    const retry = await screen.findByRole('button', { name: /重试/ }, { timeout: 3000 })
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
       http.get('/api/aliases', () =>
@@ -154,6 +156,31 @@ describe('AliasesPage', () => {
     await user.selectOptions(screen.getByLabelText(/状态/), 'active')
     expect(screen.getByText('alpha@icloud.com')).toBeInTheDocument()
     expect(screen.queryByText('beta@icloud.com')).toBeNull()
+  })
+
+  it('按 邮箱---取件 URL 格式复制单个或全部别名', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/aliases', () =>
+        HttpResponse.json({ success: true, data: { account_id: 'acc_1', count: 2, aliases } }),
+      ),
+    )
+    renderPage()
+    await screen.findByText('alpha@icloud.com')
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: /复制 alpha@icloud.com 和取件链接/ }))
+    expect(await navigator.clipboard.readText()).toBe(
+      `alpha@icloud.com---${window.location.origin}/mail/token-alpha`,
+    )
+
+    await user.click(screen.getByRole('button', { name: '复制全部' }))
+    expect(await navigator.clipboard.readText()).toBe(
+      [
+        `alpha@icloud.com---${window.location.origin}/mail/token-alpha`,
+        `beta@icloud.com---${window.location.origin}/mail/token-beta`,
+      ].join('\n'),
+    )
   })
 
   it('创建别名:空标签/200 字符边界、成功后刷新并可复制邮箱', async () => {

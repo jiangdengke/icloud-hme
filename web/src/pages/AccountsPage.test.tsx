@@ -89,7 +89,7 @@ describe('AccountsPage', () => {
     expect(screen.queryByText(/cookie-secret|app-secret|proxy-secret/)).toBeNull()
   })
 
-  it('添加账号:校验必填、请求期间禁用、成功刷新', async () => {
+  it('接入账号:自动生成名称、请求期间禁用、成功刷新', async () => {
     let listData = accounts
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: listData })),
@@ -111,27 +111,36 @@ describe('AccountsPage', () => {
     renderPage()
     await screen.findByText('活跃号')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: /添加账号/ }))
-    fireEvent.change(screen.getByLabelText(/名称/), { target: { value: '新账号' } })
-    fireEvent.change(screen.getByLabelText(/iCloud 邮箱/), { target: { value: 'new@icloud.com' } })
+    await user.click(screen.getByRole('button', { name: /接入账号/ }))
+    expect(screen.queryByLabelText(/^名称$/)).toBeNull()
+    fireEvent.change(screen.getByLabelText(/已有账号邮箱/), { target: { value: 'new@icloud.com' } })
     await user.click(screen.getByRole('button', { name: /保存/ }))
-    // 请求期间按钮禁用;成功后列表刷新
-    await waitFor(() => expect(screen.getByText('新账号')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/^账号-[0-9A-F]{4}$/)).toBeInTheDocument())
   })
 
-  it('添加账号:host 只能选全球区或中国区', async () => {
+  it('接入账号:区域受限且无效邮箱就地报错并保持焦点', async () => {
+    let postCalls = 0
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.post('/api/accounts', () => {
+        postCalls++
+        return HttpResponse.json({ success: true, data: accounts[0] }, { status: 201 })
+      }),
     )
     renderPage()
     await screen.findByText('活跃号')
     const user = userEvent.setup()
-    await user.click(screen.getByRole('button', { name: /添加账号/ }))
+    await user.click(screen.getByRole('button', { name: /接入账号/ }))
     const hostSelect = screen.getByLabelText(/区域/)
+    expect(hostSelect).toHaveValue('icloud.com.cn')
     expect(within(hostSelect).getByText('全球区 (icloud.com)')).toBeInTheDocument()
     expect(within(hostSelect).getByText('中国区 (icloud.com.cn)')).toBeInTheDocument()
-    // 空名称提交被阻止(前端校验),dialog 保持打开
+    const email = screen.getByLabelText(/已有账号邮箱/)
+    await user.type(email, 'aaaa@ic')
     await user.click(screen.getByRole('button', { name: /保存/ }))
+    expect(await screen.findByText('请输入完整邮箱地址')).toBeInTheDocument()
+    expect(email).toHaveFocus()
+    expect(postCalls).toBe(0)
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
 

@@ -44,7 +44,8 @@ export async function request<T>(
   path: string,
   init?: RequestOptions,
   onUnauthorized?: () => void,
-): Promise<T> {  const headers = new Headers(init?.headers)
+): Promise<T> {
+  const headers = new Headers(init?.headers)
   headers.set('Accept', 'application/json')
   headers.set('Content-Type', 'application/json')
 
@@ -71,16 +72,18 @@ export async function request<T>(
     throw new ApiError(0, 'NETWORK_ERROR', '网络连接失败，请检查服务状态')
   }
 
-  if (resp.status === 401) {
-    onUnauthorized?.()
-    unauthorizedHandler?.()
-  }
-
   let payload: ApiResponse<T>
   try {
     payload = (await resp.json()) as ApiResponse<T>
   } catch {
     throw new ApiError(resp.status, 'INVALID_RESPONSE', '网络连接失败，请检查服务状态')
+  }
+
+  // 只有管理会话失效才退出后台。iCloud 上游登录失败、OTP 错误等也可能
+  // 返回 401，但这些错误应留在当前弹窗中显示，不能误清管理员会话。
+  if (resp.status === 401 && payload.success === false && payload.code === 'AUTH_REQUIRED') {
+    onUnauthorized?.()
+    unauthorizedHandler?.()
   }
 
   if (!resp.ok || payload.success === false) {

@@ -6,6 +6,8 @@ import LoginPage from './pages/LoginPage'
 import AccountsPage from './pages/AccountsPage'
 import AliasesPage from './pages/AliasesPage'
 import InboxPage from './pages/InboxPage'
+import QuickAliasPage from './pages/QuickAliasPage'
+import PublicInboxPage from './pages/PublicInboxPage'
 
 function ProtectedLayout() {
   const { status } = useAuth()
@@ -25,11 +27,13 @@ export default function App() {
         <ToastProvider>
           <Routes>
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/mail/:token" element={<PublicInboxPage />} />
             <Route element={<ProtectedLayout />}>
+              <Route path="/generate" element={<QuickAliasPage />} />
               <Route path="/accounts" element={<AccountsPage />} />
               <Route path="/aliases" element={<AliasesPage />} />
               <Route path="/inbox" element={<InboxPage />} />
-              <Route path="*" element={<Navigate to="/accounts" replace />} />
+              <Route path="*" element={<Navigate to="/generate" replace />} />
             </Route>
           </Routes>
         </ToastProvider>

@@ -6,8 +6,11 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"icloud-hme/internal/account"
 	"icloud-hme/internal/hme"
@@ -51,6 +54,7 @@ type Backend interface {
 	LoginAccount(string, string, string) (account.Summary, error)
 	RemoveAccount(string) bool
 	CreateAlias(string, string) (*hme.CreateResult, error)
+	CreateAliases(string, string, int) ([]hme.CreateResult, error)
 	ListAliases(string) ([]hme.Alias, error)
 	SetAliasActive(string, string, bool) (bool, error)
 	DeleteAlias(string, string) error
@@ -164,7 +168,7 @@ func classifyLoginErr(err error) *BackendError {
 		return &BackendError{Status: http.StatusNotFound, Code: "ACCOUNT_NOT_FOUND", Message: "账号不存在"}
 	}
 	if isSessionError(msg) {
-		return &BackendError{Status: http.StatusUnauthorized, Code: "UPSTREAM_UNAUTHORIZED", Message: "iCloud 会话失效,请更新 Cookie"}
+		return &BackendError{Status: http.StatusUnauthorized, Code: "UPSTREAM_UNAUTHORIZED", Message: "Apple 账户验证失败,请检查登录邮箱、密码和区域"}
 	}
 	return &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "iCloud 登录失败,请稍后重试"}
 }
@@ -186,6 +190,67 @@ func (b *managerBackend) CreateAlias(accountID, label string) (*hme.CreateResult
 		return nil, classifyUpstreamErr("创建邮箱失败", err)
 	}
 	return result, nil
+}
+
+// CreateAliases 使用同一个已校验的 HME 会话顺序创建多个别名，避免每个
+// 邮箱都重新 validate。发生上游错误时保留并返回已经创建成功的部分。
+func (b *managerBackend) CreateAliases(accountID, labelPrefix string, count int) ([]hme.CreateResult, error) {
+	client, err := b.mgr.HMEClient(accountID, false)
+	if err != nil {
+		return nil, mapAccountErr(err)
+	}
+	results := make([]hme.CreateResult, 0, count)
+	consecutiveFailures := 0
+	for len(results) < count {
+		label := fmt.Sprintf("%s-%02d", labelPrefix, len(results)+1)
+		result, createErr := client.CreateAlias(label, 2)
+		if createErr != nil {
+			// reserve 的响应偶尔会丢失；先按标签回查，避免邮箱已经创建
+			// 成功却因重试产生额外别名。
+			if recovered, ok := findCreatedAliasByLabel(client, label); ok {
+				results = append(results, recovered)
+				consecutiveFailures = 0
+				continue
+			}
+			log.Printf("批量创建单项失败 account_id=%s index=%d created=%d err=%v", accountID, len(results)+1, len(results), createErr)
+			if isSessionError(createErr.Error()) {
+				_ = b.mgr.SaveCookies(accountID, client.Cookies)
+				return results, classifyUpstreamErr("批量创建邮箱失败", createErr)
+			}
+			consecutiveFailures++
+			if consecutiveFailures >= 3 {
+				_ = b.mgr.SaveCookies(accountID, client.Cookies)
+				return results, classifyUpstreamErr("批量创建邮箱连续重试失败", createErr)
+			}
+			// 临时限流或服务波动时等待 5 秒、10 秒后继续同一个序号。
+			time.Sleep(time.Duration(consecutiveFailures*5) * time.Second)
+			continue
+		}
+		consecutiveFailures = 0
+		results = append(results, *result)
+		if len(results) < count {
+			time.Sleep(time.Second)
+		}
+	}
+	_ = b.mgr.SaveCookies(accountID, client.Cookies)
+	return results, nil
+}
+
+func findCreatedAliasByLabel(client *hme.Client, label string) (hme.CreateResult, bool) {
+	aliases, err := client.ListAliases()
+	if err != nil {
+		return hme.CreateResult{}, false
+	}
+	for _, alias := range aliases {
+		if alias.Label == label {
+			return hme.CreateResult{
+				Email:     alias.Email,
+				Label:     alias.Label,
+				CreatedAt: alias.CreatedAt,
+			}, true
+		}
+	}
+	return hme.CreateResult{}, false
 }
 
 // ListAliases 列出账号的 HME 别名。
@@ -263,7 +328,17 @@ func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 			Method:    "imap",
 		}, nil
 	}
-	// IMAP 失败,继续尝试 Web API
+	// Web API 的 THREAD_DIGEST 没有真实 To 字段，不能用于按别名隔离。
+	// 别名取件只接受 IMAP 的收件人匹配，防止一个公开链接看到其他别名邮件。
+	if q.Alias != "" {
+		return InboxResult{}, &BackendError{
+			Status:  http.StatusPreconditionFailed,
+			Code:    "APP_PASSWORD_REQUIRED",
+			Message: "按邮箱分隔取件需要配置有效的 App 专用密码",
+		}
+	}
+
+	// 总收件箱查询仍可回退到 Web API。
 
 	// 回退到 Web API (Cookie 认证,无需 App Password)
 	wmc, err := b.mgr.WebMailClient(q.AccountID)
@@ -271,13 +346,6 @@ func (b *managerBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 		return InboxResult{}, &BackendError{Status: http.StatusBadRequest, Code: "VALIDATION_ERROR", Message: "无可用邮件客户端: 需要 App Password 或 Cookie"}
 	}
 
-	if q.Alias != "" {
-		messages, err := wmc.FindByAlias(q.Alias, q.Limit)
-		if err != nil {
-			return InboxResult{}, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件失败"}
-		}
-		return InboxResult{AccountID: q.AccountID, Alias: q.Alias, Count: len(messages), Messages: messages, Method: "web_api"}, nil
-	}
 	messages, err := wmc.ListInbox(q.Limit)
 	if err != nil {
 		return InboxResult{}, &BackendError{Status: http.StatusBadGateway, Code: "UPSTREAM_FAILURE", Message: "读取邮件失败"}

@@ -18,7 +18,7 @@ export default function LoginPage() {
     setError('')
     try {
       await login(password)
-      navigate('/accounts', { replace: true })
+      navigate('/generate', { replace: true })
     } catch (err) {
       setError(
         err instanceof ApiError ? err.message : '网络连接失败，请检查服务状态',

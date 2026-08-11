@@ -11,6 +11,11 @@ interface DialogProps {
 export default function Dialog({ title, open, onClose, children }: DialogProps) {
   const ref = useRef<HTMLDivElement>(null)
   const lastFocused = useRef<Element | null>(null)
+  const onCloseRef = useRef(onClose)
+
+  useEffect(() => {
+    onCloseRef.current = onClose
+  }, [onClose])
 
   useEffect(() => {
     if (!open) return
@@ -27,7 +32,7 @@ export default function Dialog({ title, open, onClose, children }: DialogProps) 
 
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose()
+        onCloseRef.current()
         return
       }
       if (e.key !== 'Tab') return
@@ -50,19 +55,18 @@ export default function Dialog({ title, open, onClose, children }: DialogProps) 
         lastFocused.current.focus()
       }
     }
-  }, [open, onClose])
+  }, [open])
 
   if (!open) return null
 
   return (
-    <button
-      type="button"
-      className="dialog-backdrop"
-      aria-label="关闭对话框"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose()
-      }}
-    >
+    <div className="dialog-backdrop">
+      <button
+        type="button"
+        className="dialog-dismiss"
+        aria-label="关闭对话框"
+        onClick={onClose}
+      />
       <div
         ref={ref}
         className="dialog"
@@ -73,6 +77,6 @@ export default function Dialog({ title, open, onClose, children }: DialogProps) 
         <h3>{title}</h3>
         {children}
       </div>
-    </button>
+    </div>
   )
 }

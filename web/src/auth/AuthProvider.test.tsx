@@ -29,6 +29,7 @@ function renderApp(initialPath = '/accounts') {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<TestApp />} />
+          <Route path="/generate" element={<TestApp />} />
           <Route path="/accounts" element={<TestApp />} />
         </Routes>
       </AuthProvider>
@@ -72,7 +73,7 @@ describe('AuthProvider + LoginPage', () => {
     expect(await screen.findByRole('heading', { name: 'iCloud HME 管理台' })).toBeInTheDocument()
   })
 
-  it('登录成功进入 /accounts', async () => {
+  it('登录成功进入 /generate', async () => {
     server.use(
       http.get('/api/auth/session', () =>
         HttpResponse.json(

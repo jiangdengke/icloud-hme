@@ -5,11 +5,16 @@
 package mail
 
 import (
+	"bytes"
+	"encoding/base64"
 	"fmt"
+	"html"
 	"io"
 	"mime"
+	"mime/multipart"
 	"mime/quotedprintable"
 	"net/mail"
+	"net/textproto"
 	"regexp"
 	"strings"
 	"time"
@@ -472,51 +477,137 @@ func decodeHeader(s string) string {
 	return out
 }
 
-var htmlTag = regexp.MustCompile(`<[^>]+>`)
+var (
+	htmlTag         = regexp.MustCompile(`<[^>]+>`)
+	htmlScriptStyle = regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</(script|style)>`)
+)
+
+const maxPreviewRunes = 1200
+
+type bodyTextParts struct {
+	plain []string
+	html  []string
+}
 
 // readBody 读取邮件正文,优先 text/plain,其次从 HTML 提取纯文本。
 func readBody(msg *mail.Message) (string, error) {
-	ct := msg.Header.Get("Content-Type")
-	if strings.HasPrefix(ct, "text/html") {
-		raw, _ := io.ReadAll(msg.Body)
-		// quoted-printable 解码
-		if strings.Contains(msg.Header.Get("Content-Transfer-Encoding"), "quoted-printable") {
-			r := quotedprintable.NewReader(strings.NewReader(string(raw)))
-			raw, _ = io.ReadAll(r)
-		}
-		return stripHTML(string(raw)), nil
-	}
-	// 默认当 text/plain
-	raw, err := io.ReadAll(msg.Body)
-	if err != nil {
+	parts := bodyTextParts{}
+	if err := collectBodyText(textproto.MIMEHeader(msg.Header), msg.Body, &parts); err != nil {
 		return "", err
 	}
-	if strings.Contains(msg.Header.Get("Content-Transfer-Encoding"), "quoted-printable") {
-		r := quotedprintable.NewReader(strings.NewReader(string(raw)))
-		raw, _ = io.ReadAll(r)
+
+	text := strings.Join(parts.plain, "\n")
+	if strings.TrimSpace(text) == "" {
+		text = stripHTML(strings.Join(parts.html, "\n"))
 	}
-	return string(raw), nil
+	return normalizePreview(text), nil
+}
+
+// collectBodyText 递归读取 multipart/alternative、multipart/mixed 等常见
+// 邮件结构，只收集正文文本并跳过附件。
+func collectBodyText(header textproto.MIMEHeader, body io.Reader, out *bodyTextParts) error {
+	mediaType, params, err := mime.ParseMediaType(header.Get("Content-Type"))
+	if err != nil || mediaType == "" {
+		mediaType = "text/plain"
+		params = map[string]string{}
+	}
+	mediaType = strings.ToLower(mediaType)
+
+	disposition, _, _ := mime.ParseMediaType(header.Get("Content-Disposition"))
+	if strings.EqualFold(disposition, "attachment") {
+		return nil
+	}
+
+	decoded := decodeTransfer(body, header.Get("Content-Transfer-Encoding"))
+	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return fmt.Errorf("multipart 邮件缺少 boundary")
+		}
+		reader := multipart.NewReader(decoded, boundary)
+		for {
+			part, partErr := reader.NextPart()
+			if partErr == io.EOF {
+				return nil
+			}
+			if partErr != nil {
+				return partErr
+			}
+			if err := collectBodyText(part.Header, part, out); err != nil {
+				_ = part.Close()
+				return err
+			}
+			_ = part.Close()
+		}
+	}
+
+	if mediaType == "message/rfc822" {
+		nested, err := mail.ReadMessage(decoded)
+		if err != nil {
+			return err
+		}
+		return collectBodyText(textproto.MIMEHeader(nested.Header), nested.Body, out)
+	}
+	if mediaType != "text/plain" && mediaType != "text/html" {
+		return nil
+	}
+
+	raw, err := io.ReadAll(decoded)
+	if err != nil {
+		return err
+	}
+	if label := strings.TrimSpace(params["charset"]); label != "" && !strings.EqualFold(label, "utf-8") && !strings.EqualFold(label, "us-ascii") {
+		if converted, convertErr := charset.Reader(label, bytes.NewReader(raw)); convertErr == nil {
+			if decodedRaw, readErr := io.ReadAll(converted); readErr == nil {
+				raw = decodedRaw
+			}
+		}
+	}
+	if mediaType == "text/plain" {
+		out.plain = append(out.plain, string(raw))
+	} else {
+		out.html = append(out.html, string(raw))
+	}
+	return nil
+}
+
+func decodeTransfer(body io.Reader, encoding string) io.Reader {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "quoted-printable":
+		return quotedprintable.NewReader(body)
+	case "base64":
+		return base64.NewDecoder(base64.StdEncoding, body)
+	default:
+		return body
+	}
+}
+
+func normalizePreview(text string) string {
+	text = strings.ReplaceAll(text, "\x00", "")
+	text = strings.Join(strings.Fields(text), " ")
+	runes := []rune(text)
+	if len(runes) > maxPreviewRunes {
+		text = string(runes[:maxPreviewRunes]) + "..."
+	}
+	return strings.TrimSpace(text)
 }
 
 // stripHTML 粗略剥离 HTML 标签,保留可读文本。
-func stripHTML(html string) string {
+func stripHTML(source string) string {
+	source = htmlScriptStyle.ReplaceAllString(source, "")
 	// 换行标签转换行
-	html = strings.ReplaceAll(html, "<br>", "\n")
-	html = strings.ReplaceAll(html, "<br/>", "\n")
-	html = strings.ReplaceAll(html, "<br />", "\n")
-	html = strings.ReplaceAll(html, "</p>", "\n")
-	html = strings.ReplaceAll(html, "</div>", "\n")
-	html = strings.ReplaceAll(html, "</tr>", "\n")
-	html = strings.ReplaceAll(html, "<li>", "\n- ")
+	source = strings.ReplaceAll(source, "<br>", "\n")
+	source = strings.ReplaceAll(source, "<br/>", "\n")
+	source = strings.ReplaceAll(source, "<br />", "\n")
+	source = strings.ReplaceAll(source, "</p>", "\n")
+	source = strings.ReplaceAll(source, "</div>", "\n")
+	source = strings.ReplaceAll(source, "</tr>", "\n")
+	source = strings.ReplaceAll(source, "<li>", "\n- ")
 	// 去掉所有标签
-	html = htmlTag.ReplaceAllString(html, "")
-	// 反转义常见实体
-	html = strings.ReplaceAll(html, "&nbsp;", " ")
-	html = strings.ReplaceAll(html, "&amp;", "&")
-	html = strings.ReplaceAll(html, "&lt;", "<")
-	html = strings.ReplaceAll(html, "&gt;", ">")
+	source = htmlTag.ReplaceAllString(source, "")
+	source = html.UnescapeString(source)
 	// 压缩多余空白
-	lines := strings.Split(html, "\n")
+	lines := strings.Split(source, "\n")
 	for i, l := range lines {
 		lines[i] = strings.TrimSpace(l)
 	}

@@ -2,10 +2,12 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,10 +18,16 @@ import (
 
 // fakeBackend 是测试用内存 Backend,记录调用,不访问网络。
 type fakeBackend struct {
-	accounts []account.Summary
-	aliases  []hme.Alias
-	inbox    InboxResult
-	created  *hme.CreateResult
+	accounts     []account.Summary
+	aliases      []hme.Alias
+	inbox        InboxResult
+	inboxErr     error
+	created      *hme.CreateResult
+	batchCreated []hme.CreateResult
+	batchErr     error
+	batchAccount string
+	batchPrefix  string
+	batchCount   int
 
 	addedInput   account.AddAccountInput
 	updatedID    string
@@ -103,6 +111,11 @@ func (f *fakeBackend) CreateAlias(accountID, label string) (*hme.CreateResult, e
 	return f.created, nil
 }
 
+func (f *fakeBackend) CreateAliases(accountID, labelPrefix string, count int) ([]hme.CreateResult, error) {
+	f.batchAccount, f.batchPrefix, f.batchCount = accountID, labelPrefix, count
+	return f.batchCreated, f.batchErr
+}
+
 func (f *fakeBackend) ListAliases(accountID string) ([]hme.Alias, error) {
 	return f.aliases, nil
 }
@@ -119,7 +132,27 @@ func (f *fakeBackend) DeleteAlias(accountID, anonymousID string) error {
 
 func (f *fakeBackend) ListInbox(q InboxQuery) (InboxResult, error) {
 	f.listInboxQuery = q
-	return f.inbox, nil
+	return f.inbox, f.inboxErr
+}
+
+func TestAliasInboxDoesNotFallBackToUnfilteredWebAPI(t *testing.T) {
+	dir := t.TempDir()
+	raw := `{"accounts":{"acc_1":{"id":"acc_1","name":"test","icloud_email":"owner@icloud.com","cookies":{"session":"fixture"},"host":"icloud.com","status":"active"}}}`
+	if err := os.WriteFile(dir+"/accounts.json", []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := account.NewManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mgr.Close()
+
+	b := &managerBackend{mgr: mgr}
+	_, err = b.ListInbox(InboxQuery{AccountID: "acc_1", Alias: "unused@icloud.com", Limit: 20, Days: 30})
+	var backendErr *BackendError
+	if !errors.As(err, &backendErr) || backendErr.Code != "APP_PASSWORD_REQUIRED" {
+		t.Fatalf("别名查询应要求精确 IMAP 过滤，得到: %v", err)
+	}
 }
 
 func (f *fakeBackend) Reload() error {

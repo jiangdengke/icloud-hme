@@ -20,36 +20,51 @@ import (
 	"icloud-hme/internal/srp"
 )
 
-// AuthEndpoints iCloud 认证 API 端点
-const (
-	OAuthClientID = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
+// OAuthClientID 是 iCloud Web 登录使用的一方 OAuth 客户端标识。
+const OAuthClientID = "d39ba9916b7251055b22c7f910e2ea796ee65e98b2ddecea8f5dde8d9d1a815d"
 
-	authStartFmt    = "https://idmsa.apple.com/appleauth/auth/authorize/signin?frame_id=auth-%s&language=en_US&skVersion=7&iframeId=auth-%s&client_id=%s&redirect_uri=https://www.icloud.com&response_type=code&response_mode=web_message&state=auth-%s&authVersion=latest"
-	authFederate    = "https://idmsa.apple.com/appleauth/auth/federate?isRememberMeEnabled=true"
-	authInit        = "https://idmsa.apple.com/appleauth/auth/signin/init"
-	authComplete    = "https://idmsa.apple.com/appleauth/auth/signin/complete?isRememberMeEnabled=true"
-	authOptions     = "https://idmsa.apple.com/appleauth/auth"
-	submitSecurity  = "https://idmsa.apple.com/appleauth/auth/verify/%s/securitycode"
-	authTrust       = "https://idmsa.apple.com/appleauth/auth/2sv/trust"
-	authWebFmt      = "https://setup.icloud.com/setup/ws/1/accountLogin"
-	authValidateFmt = "https://setup.icloud.com/setup/ws/1/validate?clientBuildNumber=%s&clientMasteringNumber=%s&clientId=%s"
-)
+const appleFDClientInfo = `{"U":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36","L":"zh-CN","Z":"GMT+08:00","V":"1.1","F":".ta44j1e3NlY5BNlY5BSs5uQ32SCVgdI.AqWJ4EKKw0fVD_DJhCizgzH_y3EjNklY_ia4WFL264HRe4FSr_JzC1zJ6rgNNlY5BNp55BNlan0Os5Apw.BS1"}`
 
 // OTPProvider 双重认证回调函数,返回 2FA 验证码
 type OTPProvider func() (string, error)
 
 // authState 保存认证过程中的状态
 type authState struct {
-	username   string
-	password   string
-	frameId    string
-	clientId   string
-	authAttr   string
-	sessionID  string
-	scnt       string
-	authToken  string
-	trustToken string
-	dsid       string
+	username       string
+	password       string
+	frameId        string
+	clientId       string
+	authAttr       string
+	sessionID      string
+	scnt           string
+	authToken      string
+	trustToken     string
+	accountCountry string
+	dsid           string
+}
+
+// authOrigin 按账号区域返回 Apple 身份认证域名。
+func (c *Client) authOrigin() string {
+	if c.Host == "icloud.com.cn" {
+		return "https://idmsa.apple.com.cn"
+	}
+	return "https://idmsa.apple.com"
+}
+
+func (c *Client) authURL(path string) string {
+	return c.authOrigin() + "/appleauth/auth" + path
+}
+
+func (c *Client) authStartURL(state *authState) string {
+	return fmt.Sprintf(
+		"%s?frame_id=auth-%s&language=zh_CN&skVersion=7&iframeId=auth-%s&client_id=%s&redirect_uri=%s&response_type=code&response_mode=web_message&state=auth-%s&authVersion=latest",
+		c.authURL("/authorize/signin"), state.frameId, state.frameId, state.clientId,
+		url.QueryEscape(c.Origin()), state.frameId,
+	)
+}
+
+func (c *Client) authWebURL() string {
+	return "https://setup." + c.Host + "/setup/ws/1/accountLogin"
 }
 
 // Login 使用 iCloud 账号密码登录,获取 session token Cookie。
@@ -63,12 +78,16 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 	}
 
 	// 1. 初始化 frameId 和 clientId
+	c.log("认证步骤 1/6: auth-start (%s)", c.Host)
 	if err := c.authStart(state); err != nil {
+		c.log("认证失败: auth-start: %v", err)
 		return fmt.Errorf("auth start: %w", err)
 	}
 
 	// 2. 提交用户名
+	c.log("认证步骤 2/6: auth-federate")
 	if err := c.authFederate(state); err != nil {
+		c.log("认证失败: auth-federate: %v", err)
 		return fmt.Errorf("auth federate: %w", err)
 	}
 
@@ -78,8 +97,10 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 	srpClient := srp.NewSRPClient(params, nil)
 
 	// 4. 获取 salt 和 B
+	c.log("认证步骤 3/6: auth-init")
 	authInitResp, err := c.authInit(state, base64.StdEncoding.EncodeToString(srpClient.GetABytes()))
 	if err != nil {
+		c.log("认证失败: auth-init: %v", err)
 		return fmt.Errorf("auth init: %w", err)
 	}
 
@@ -101,17 +122,23 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 	srpClient.ProcessClientChanllenge([]byte(username), passKey, saltDec, bDec)
 
 	// 8. 提交 SRP 响应 (可能触发 2FA)
-	if err := c.authComplete(state, base64.StdEncoding.EncodeToString(srpClient.M1), base64.StdEncoding.EncodeToString(srpClient.M2), otpProvider); err != nil {
+	c.log("认证步骤 4/6: auth-complete")
+	if err := c.authComplete(state, authInitResp.C, base64.StdEncoding.EncodeToString(srpClient.M1), base64.StdEncoding.EncodeToString(srpClient.M2), otpProvider); err != nil {
+		c.log("认证失败: auth-complete: %v", err)
 		return fmt.Errorf("auth complete: %w", err)
 	}
 
 	// 9. 信任设备
+	c.log("认证步骤 5/6: trust")
 	if err := c.getTrust(state); err != nil {
+		c.log("认证失败: trust: %v", err)
 		return fmt.Errorf("get trust: %w", err)
 	}
 
 	// 10. 获取 iCloud Web 服务 Cookie
+	c.log("认证步骤 6/6: account-login")
 	if err := c.authenticateWeb(state); err != nil {
+		c.log("认证失败: account-login: %v", err)
 		return fmt.Errorf("authenticate web: %w", err)
 	}
 
@@ -129,7 +156,7 @@ func (c *Client) authStart(state *authState) error {
 	state.frameId = strings.ToLower(uuid.New().String())
 	state.clientId = OAuthClientID
 
-	req, err := http.NewRequest("GET", fmt.Sprintf(authStartFmt, state.frameId, state.frameId, state.clientId, state.frameId), nil)
+	req, err := http.NewRequest("GET", c.authStartURL(state), nil)
 	if err != nil {
 		return err
 	}
@@ -154,7 +181,7 @@ func (c *Client) authStart(state *authState) error {
 // authFederate 提交用户名
 func (c *Client) authFederate(state *authState) error {
 	data := `{"accountName":"` + state.username + `","rememberMe":true}`
-	req, err := http.NewRequest("POST", authFederate, bytes.NewReader([]byte(data)))
+	req, err := http.NewRequest("POST", c.authURL("/federate?isRememberMeEnabled=true"), bytes.NewReader([]byte(data)))
 	if err != nil {
 		return err
 	}
@@ -196,7 +223,7 @@ func (c *Client) authInit(state *authState, a string) (*authInitResp, error) {
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", authInit, bytes.NewReader(data))
+	req, err := http.NewRequest("POST", c.authURL("/signin/init"), bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
@@ -209,6 +236,9 @@ func (c *Client) authInit(state *authState, a string) (*authInitResp, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("unexpected status: %d", resp.StatusCode)
+	}
 
 	var result authInitResp
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -218,13 +248,13 @@ func (c *Client) authInit(state *authState, a string) (*authInitResp, error) {
 }
 
 // authComplete 提交 SRP 响应
-func (c *Client) authComplete(state *authState, m1, m2 string, otpProvider OTPProvider) error {
+func (c *Client) authComplete(state *authState, challenge, m1, m2 string, otpProvider OTPProvider) error {
 	reqBody := map[string]interface{}{
 		"accountName": state.username,
 		"rememberMe":  true,
 		"trustTokens": []string{},
 		"m1":          m1,
-		"c":           state.clientId,
+		"c":           challenge,
 		"m2":          m2,
 	}
 
@@ -233,7 +263,7 @@ func (c *Client) authComplete(state *authState, m1, m2 string, otpProvider OTPPr
 		return err
 	}
 
-	req, err := http.NewRequest("POST", authComplete, bytes.NewReader(data))
+	req, err := http.NewRequest("POST", c.authURL("/signin/complete?isRememberMeEnabled=true"), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -246,6 +276,9 @@ func (c *Client) authComplete(state *authState, m1, m2 string, otpProvider OTPPr
 		return err
 	}
 	defer resp.Body.Close()
+	if country := resp.Header.Get("X-Apple-ID-Account-Country"); country != "" {
+		state.accountCountry = country
+	}
 
 	switch resp.StatusCode {
 	case 200:
@@ -267,6 +300,26 @@ func (c *Client) handleTwoFactor(state *authState, signinResp *http.Response, ot
 	state.sessionID = signinResp.Header.Get("X-Apple-ID-Session-Id")
 	state.scnt = signinResp.Header.Get("scnt")
 
+	// Apple 要求先读取双重认证选项。这个请求会刷新 scnt，并且在
+	// 受信任设备上触发“Apple 账户登录请求”弹窗。先前直接返回
+	// OTP_REQUIRED，会导致网页已显示验证码输入框，手机却没有收到提示。
+	optionsReq, err := http.NewRequest("GET", c.authURL(""), nil)
+	if err != nil {
+		return err
+	}
+	optionsReq.Header = c.updateAuthHeaders(optionsReq.Header, state)
+	optionsResp, err := c.httpc.Do(optionsReq)
+	if err != nil {
+		return err
+	}
+	defer optionsResp.Body.Close()
+	if optionsResp.StatusCode != 200 {
+		return fmt.Errorf("获取双重认证选项失败: HTTP %d", optionsResp.StatusCode)
+	}
+	if newScnt := optionsResp.Header.Get("scnt"); newScnt != "" {
+		state.scnt = newScnt
+	}
+
 	if otpProvider == nil {
 		return fmt.Errorf("账号启用了双重认证,需要提供 OTP")
 	}
@@ -282,7 +335,7 @@ func (c *Client) handleTwoFactor(state *authState, signinResp *http.Response, ot
 	}
 
 	data, _ := json.Marshal(reqBody)
-	req, err := http.NewRequest("POST", fmt.Sprintf(submitSecurity, "trusteddevice"), bytes.NewReader(data))
+	req, err := http.NewRequest("POST", fmt.Sprintf(c.authURL("/verify/%s/securitycode"), "trusteddevice"), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -308,7 +361,7 @@ func (c *Client) handleTwoFactor(state *authState, signinResp *http.Response, ot
 
 // getTrust 获取 trust token
 func (c *Client) getTrust(state *authState) error {
-	req, err := http.NewRequest("GET", authTrust, nil)
+	req, err := http.NewRequest("GET", c.authURL("/2sv/trust"), nil)
 	if err != nil {
 		return err
 	}
@@ -332,10 +385,17 @@ func (c *Client) getTrust(state *authState) error {
 
 // authenticateWeb 认证 iCloud Web 服务
 func (c *Client) authenticateWeb(state *authState) error {
-	body := fmt.Sprintf(`{"dsWebAuthToken":"%s","accountCountryCode":"USA","extended_login":true,"trustToken":"%s"}`,
-		state.authToken, state.trustToken)
+	country := state.accountCountry
+	if country == "" {
+		country = "USA"
+		if c.Host == "icloud.com.cn" {
+			country = "CHN"
+		}
+	}
+	body := fmt.Sprintf(`{"dsWebAuthToken":"%s","accountCountryCode":"%s","extended_login":true,"trustToken":"%s"}`,
+		state.authToken, country, state.trustToken)
 
-	req, err := http.NewRequest("POST", authWebFmt, bytes.NewReader([]byte(body)))
+	req, err := http.NewRequest("POST", c.authWebURL(), bytes.NewReader([]byte(body)))
 	if err != nil {
 		return err
 	}
@@ -362,9 +422,9 @@ func (c *Client) authenticateWeb(state *authState) error {
 	json.NewDecoder(resp.Body).Decode(&result)
 	state.dsid = result.DsInfo.Dsid
 
-	// 复制 idmsa.apple.com 的 Cookie 到 icloud.com
-	u1, _ := url.Parse("https://idmsa.apple.com")
-	u2, _ := url.Parse("https://icloud.com")
+	// 复制 Apple 身份域 Cookie 到当前 iCloud 区域。
+	u1, _ := url.Parse(c.authOrigin())
+	u2, _ := url.Parse(c.Origin())
 	cookies := c.httpc.GetCookies(u1)
 	c.httpc.SetCookies(u2, cookies)
 
@@ -393,9 +453,23 @@ func (c *Client) updateAuthHeaders(header http.Header, state *authState) http.He
 	header.Set("X-Requested-With", "XMLHttpRequest")
 	header.Set("Content-Type", "application/json")
 	header.Set("Accept", "application/json")
-	header.Set("Referer", "https://idmsa.apple.com/")
-	header.Set("Origin", "https://idmsa.apple.com")
+	header.Set("Referer", c.authOrigin()+"/")
+	header.Set("Origin", c.authOrigin())
 	header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+	header.Set("X-Apple-I-Require-UE", "true")
+	header.Set("X-Apple-Auth-Attributes", state.authAttr)
+	header.Set("X-Apple-Widget-Key", state.clientId)
+	header.Set("X-Apple-Mandate-Security-Upgrade", "0")
+	header.Set("X-Apple-Oauth-Client-Id", state.clientId)
+	header.Set("X-Apple-I-FD-Client-Info", appleFDClientInfo)
+	header.Set("X-Apple-Oauth-Client-Type", "firstPartyAuth")
+	header.Set("X-Apple-Oauth-Redirect-URI", c.Origin())
+	header.Set("X-Apple-Oauth-Require-Grant-Code", "true")
+	header.Set("X-Apple-Oauth-Response-Mode", "web_message")
+	header.Set("X-Apple-Oauth-Response-Type", "code")
+	header.Set("X-Apple-Oauth-State", "auth-"+state.frameId)
+	header.Set("X-Apple-Offer-Security-Upgrade", "1")
+	header.Set("X-Apple-Frame-Id", "auth-"+state.frameId)
 
 	return header
 }
