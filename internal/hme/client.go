@@ -58,6 +58,8 @@ type Alias struct {
 	Active      bool   `json:"active"`
 	CreatedAt   string `json:"createdAt,omitempty"`
 	InboxURL    string `json:"inboxUrl,omitempty"`
+	Exported    bool   `json:"exported"`
+	ExportedAt  string `json:"exportedAt,omitempty"`
 }
 
 // Client 是 iCloud Hide My Email 客户端。

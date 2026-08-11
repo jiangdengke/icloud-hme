@@ -317,7 +317,8 @@ func (m *generationTaskManager) completeAttempt(accountID string, runID uint64, 
 		return false
 	}
 	task.state.State = "cooldown"
-	task.state.NextRunAt = now.Add(delay).Format(time.RFC3339)
+	// 调度时间保留小数秒，避免短冷却被 RFC3339 的整秒截断后立即重试。
+	task.state.NextRunAt = now.Add(delay).Format(time.RFC3339Nano)
 	m.persistLocked()
 	return true
 }

@@ -96,6 +96,16 @@ export function IconCopy(props: IconProps) {
   )
 }
 
+export function IconDownload(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M12 3v12" />
+      <path d="M7 10l5 5 5-5" />
+      <path d="M5 21h14" />
+    </svg>
+  )
+}
+
 export function IconSearch(props: IconProps) {
   return (
     <svg {...base(props)}>

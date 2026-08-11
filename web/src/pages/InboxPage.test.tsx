@@ -110,6 +110,24 @@ describe('InboxPage', () => {
     expect(screen.getByText(/Web API/)).toBeInTheDocument()
   })
 
+  it('列表保持紧凑，点击后在弹窗展示完整邮件内容', async () => {
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/inbox', () => HttpResponse.json({ success: true, data: inboxResult })),
+    )
+    renderPage()
+    await screen.findByText('主题一')
+    expect(screen.queryByText('预览内容')).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: '查看详情' }))
+    const dialog = screen.getByRole('dialog', { name: '主题一' })
+    expect(dialog).toHaveTextContent('sender@example.com')
+    expect(dialog).toHaveTextContent('alpha@icloud.com')
+    expect(dialog).toHaveTextContent('预览内容')
+    await userEvent.click(screen.getByRole('button', { name: '关闭' }))
+    expect(screen.queryByRole('dialog')).toBeNull()
+  })
+
   it('空列表、网络错误、401 状态', async () => {
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),

@@ -21,7 +21,7 @@ HTTP JSON API，所有接口返回统一格式：
 }
 ```
 
-**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CSRF_INVALID`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`INTERNAL_ERROR`
+**稳定错误码：** `AUTH_REQUIRED`、`INVALID_CREDENTIALS`、`RATE_LIMITED`、`CSRF_INVALID`、`VALIDATION_ERROR`、`ACCOUNT_NOT_FOUND`、`OTP_REQUIRED`、`OTP_INVALID`、`UPSTREAM_UNAUTHORIZED`、`UPSTREAM_FAILURE`、`PERSISTENCE_FAILURE`、`INTERNAL_ERROR`
 
 **安全约定：**
 
@@ -302,14 +302,52 @@ GET /api/aliases?account_id=acc_1
         "anonymousId": "abc123",
         "label": "注册某网站",
         "active": true,
-        "createdAt": "2026-01-15T10:30:00Z"
+        "createdAt": "2026-01-15T10:30:00Z",
+        "inboxUrl": "/mail/signed-token",
+        "exported": false
       }
     ]
   }
 }
 ```
 
-### 15. 停用/激活/删除别名
+`exportedAt` 仅在邮箱已经导出时返回。导出状态保存在数据目录的
+`alias_exports.json`，服务重启后仍然有效。
+
+### 15. 首次导出别名
+
+```http
+POST /api/aliases/export
+X-CSRF-Token: <token>
+
+{
+  "account_id": "acc_1",
+  "emails": ["xyz123@icloud.com"]
+}
+```
+
+接口以账号和邮箱为键原子认领首次导出。已经导出的邮箱不会再次出现在
+`items` 中，因此重复请求或并发请求不会产生重复导出内容。单次支持 1–1000
+个邮箱。
+
+```json
+{
+  "success": true,
+  "data": {
+    "account_id": "acc_1",
+    "count": 1,
+    "items": [
+      {
+        "email": "xyz123@icloud.com",
+        "inbox_url": "/mail/signed-token",
+        "exported_at": "2026-08-11T09:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+### 16. 停用/激活/删除别名
 
 ```http
 POST /api/aliases/:id/deactivate
@@ -324,7 +362,7 @@ X-CSRF-Token: <token>
 - `account_id` 必填
 - 删除不可恢复；直接删除失败时会先停用再删
 
-### 16. 重新加载配置
+### 17. 重新加载配置
 
 ```http
 POST /api/reload

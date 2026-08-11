@@ -37,6 +37,8 @@ type Config struct {
 	PublicLinkSecret []byte
 	// GenerationTaskStatePath 保存持续生成任务状态，服务重启后自动恢复。
 	GenerationTaskStatePath string
+	// AliasExportStatePath 保存别名首次导出的时间，避免重复导出。
+	AliasExportStatePath string
 	// 以下两个字段只用于测试覆盖默认调度间隔。
 	generationSuccessDelay time.Duration
 	generationFailureDelay []time.Duration
@@ -50,6 +52,7 @@ type Server struct {
 	cfg              Config
 	publicLinkSecret []byte
 	generationTasks  *generationTaskManager
+	aliasExports     *aliasExportStore
 	r                *gin.Engine
 }
 
@@ -61,7 +64,13 @@ func New(mgr *account.Manager, cfg Config) (*Server, error) {
 	}); err != nil {
 		return nil, err
 	}
-	return newWithBackend(&managerBackend{mgr: mgr}, cfg), nil
+	exportStore := newAliasExportStore(cfg.AliasExportStatePath)
+	if exportStore.loadErr != nil {
+		return nil, exportStore.loadErr
+	}
+	s := newWithBackend(&managerBackend{mgr: mgr}, cfg)
+	s.aliasExports = exportStore
+	return s, nil
 }
 
 // newWithBackend 创建 Server 并注入 Backend(测试使用内存 fake)。
@@ -75,6 +84,7 @@ func newWithBackend(be Backend, cfg Config) *Server {
 		cfg:     cfg,
 	}
 	s.publicLinkSecret = normalizePublicLinkSecret(cfg.PublicLinkSecret, cfg.AdminPassword)
+	s.aliasExports = newAliasExportStore(cfg.AliasExportStatePath)
 	s.generationTasks = newGenerationTaskManager(be, generationTaskOptions{
 		statePath:     cfg.GenerationTaskStatePath,
 		successDelay:  cfg.generationSuccessDelay,
@@ -138,6 +148,7 @@ func (s *Server) register() {
 
 			// ===== 别名管理 =====
 			authed.GET("/aliases", s.listAliasesHandler)
+			authed.POST("/aliases/export", csrfCheck(s.auth), s.exportAliasesHandler)
 			authed.POST("/aliases/:id/deactivate", csrfCheck(s.auth), s.deactivateAliasHandler)
 			authed.POST("/aliases/:id/reactivate", csrfCheck(s.auth), s.reactivateAliasHandler)
 			authed.DELETE("/aliases/:id", csrfCheck(s.auth), s.deleteAliasHandler)
@@ -333,6 +344,8 @@ func (s *Server) listAliasesHandler(c *gin.Context) {
 	}
 	for i := range aliases {
 		aliases[i].InboxURL = s.publicInboxPath(accountID, aliases[i].Email)
+		aliases[i].ExportedAt = s.aliasExports.ExportedAt(accountID, aliases[i].Email)
+		aliases[i].Exported = aliases[i].ExportedAt != ""
 	}
 	ok(c, gin.H{
 		"account_id": accountID,

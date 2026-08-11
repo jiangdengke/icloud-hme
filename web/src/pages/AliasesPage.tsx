@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
-import type { AccountSummary, Alias } from '../api/types'
+import type { AccountSummary, Alias, AliasExportResult } from '../api/types'
 import AsyncState from '../components/AsyncState'
 import CreateAliasDialog from '../components/CreateAliasDialog'
 import ConfirmDialog from '../components/ConfirmDialog'
 import { useToast } from '../components/ToastProvider'
-import { IconCheck, IconClock, IconCopy, IconPlus, IconSearch, IconTrash } from '../components/icons'
+import { IconCheck, IconClock, IconCopy, IconDownload, IconPlus, IconSearch, IconTrash } from '../components/icons'
 
 function formatDate(raw: string): string {
-  const d = new Date(raw)
+  const numeric = /^\d{10,13}$/.test(raw) ? Number(raw) : Number.NaN
+  const d = Number.isNaN(numeric)
+    ? new Date(raw)
+    : new Date(raw.length === 10 ? numeric * 1000 : numeric)
   if (Number.isNaN(d.getTime())) return raw
   return new Intl.DateTimeFormat('zh-CN', {
     year: 'numeric',
@@ -29,6 +32,7 @@ export default function AliasesPage() {
   const [retryKey, setRetryKey] = useState(0)
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<'all' | 'active' | 'inactive'>('all')
+  const [exportFilter, setExportFilter] = useState<'all' | 'pending' | 'exported'>('all')
   const [createOpen, setCreateOpen] = useState(false)
   const [confirm, setConfirm] = useState<{
     type: 'deactivate' | 'reactivate' | 'delete'
@@ -36,6 +40,7 @@ export default function AliasesPage() {
   } | null>(null)
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState('')
+  const [exporting, setExporting] = useState(false)
 
   const [searchParams, setSearchParams] = useSearchParams()
   const { show } = useToast()
@@ -97,12 +102,19 @@ export default function AliasesPage() {
     return aliases.filter((a) => {
       if (filter === 'active' && !a.active) return false
       if (filter === 'inactive' && a.active) return false
+      if (exportFilter === 'pending' && a.exported) return false
+      if (exportFilter === 'exported' && !a.exported) return false
       if (!q) return true
       return (
         a.email.toLowerCase().includes(q) || a.label.toLowerCase().includes(q)
       )
     })
-  }, [aliases, search, filter])
+  }, [aliases, search, filter, exportFilter])
+
+  const pendingExports = useMemo(
+    () => filtered.filter((alias) => alias.inboxUrl && !alias.exported),
+    [filtered],
+  )
 
   function handleRetry() {
     setLoading(true)
@@ -135,18 +147,49 @@ export default function AliasesPage() {
     [show],
   )
 
-  const copyAllInboxURLs = useCallback(async () => {
-    const lines = filtered
-      .filter((alias) => alias.inboxUrl)
-      .map((alias) => `${alias.email}---${new URL(alias.inboxUrl ?? '', window.location.origin).href}`)
-    if (lines.length === 0) return
+  const exportPendingAliases = useCallback(async () => {
+    if (pendingExports.length === 0 || exporting) return
+    setExporting(true)
+    setActionError('')
     try {
-      await navigator.clipboard.writeText(lines.join('\n'))
-      show(`已复制 ${lines.length} 个邮箱和取件链接`)
-    } catch {
-      show('批量复制失败，请重试')
+      const data = await request<AliasExportResult>('/api/aliases/export', {
+        method: 'POST',
+        body: {
+          account_id: accountId,
+          emails: pendingExports.map((alias) => alias.email),
+        },
+      })
+      if (data.items.length === 0) {
+        setRetryKey((key) => key + 1)
+        show('这些邮箱此前已经导出')
+        return
+      }
+
+      const lines = data.items.map(
+        (item) => `${item.email}---${new URL(item.inbox_url, window.location.origin).href}`,
+      )
+      const blob = new Blob([`\uFEFF${lines.join('\n')}\n`], { type: 'text/plain;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `icloud-aliases-${new Date().toISOString().slice(0, 10)}.txt`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+
+      const exported = new Map(data.items.map((item) => [item.email.toLowerCase(), item.exported_at]))
+      setAliases((current) => current.map((alias) => {
+        const exportedAt = exported.get(alias.email.toLowerCase())
+        return exportedAt ? { ...alias, exported: true, exportedAt } : alias
+      }))
+      show(`已导出 ${data.items.length} 个邮箱，本次不会包含已导出项`)
+    } catch (err) {
+      setActionError(err instanceof ApiError ? err.message : '导出失败，请检查服务状态')
+    } finally {
+      setExporting(false)
     }
-  }, [filtered, show])
+  }, [accountId, exporting, pendingExports, show])
 
   async function runAction(type: 'deactivate' | 'reactivate' | 'delete') {
     if (!confirm) return
@@ -228,11 +271,11 @@ export default function AliasesPage() {
           </button>
           <button
             type="button"
-            onClick={() => void copyAllInboxURLs()}
-            disabled={!filtered.some((alias) => alias.inboxUrl)}
+            onClick={() => void exportPendingAliases()}
+            disabled={pendingExports.length === 0 || exporting}
           >
-            <IconCopy size={16} />
-            复制全部
+            <IconDownload size={16} />
+            {exporting ? '导出中' : `导出未导出 (${pendingExports.length})`}
           </button>
         </div>
       </div>
@@ -278,6 +321,19 @@ export default function AliasesPage() {
             <option value="inactive">已停用</option>
           </select>
         </div>
+        <div>
+          <label htmlFor="alias-export-filter">导出状态</label>
+          <select
+            id="alias-export-filter"
+            value={exportFilter}
+            onChange={(e) => setExportFilter(e.target.value as 'all' | 'pending' | 'exported')}
+            style={{ width: 'auto' }}
+          >
+            <option value="all">全部</option>
+            <option value="pending">未导出</option>
+            <option value="exported">已导出</option>
+          </select>
+        </div>
       </div>
 
       <AsyncState
@@ -294,6 +350,7 @@ export default function AliasesPage() {
                 <th>邮箱</th>
                 <th>标签</th>
                 <th>状态</th>
+                <th>导出状态</th>
                 <th>创建时间</th>
                 <th>操作</th>
               </tr>
@@ -317,6 +374,13 @@ export default function AliasesPage() {
                       {alias.active ? <IconCheck size={12} /> : <IconClock size={12} />}
                       {alias.active ? '已启用' : '已停用'}
                     </span>
+                  </td>
+                  <td>
+                    <span className={alias.exported ? 'badge badge-info' : 'badge badge-pending'}>
+                      {alias.exported ? <IconCheck size={12} /> : <IconClock size={12} />}
+                      {alias.exported ? '已导出' : '未导出'}
+                    </span>
+                    {alias.exportedAt && <span className="cell-secondary">{formatDate(alias.exportedAt)}</span>}
                   </td>
                   <td>{alias.createdAt ? formatDate(alias.createdAt) : '—'}</td>
                   <td>

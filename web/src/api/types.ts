@@ -36,6 +36,21 @@ export interface Alias {
   active: boolean
   createdAt?: string
   inboxUrl?: string
+  exported?: boolean
+  exportedAt?: string
+}
+
+/** 首次导出的隐藏邮箱及其独立取件链接 */
+export interface ExportedAlias {
+  email: string
+  inbox_url: string
+  exported_at: string
+}
+
+export interface AliasExportResult {
+  account_id: string
+  count: number
+  items: ExportedAlias[]
 }
 
 /** 创建成功的隐藏邮箱及其独立取件链接 */

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
-import type { AccountSummary, Alias, InboxResult } from '../api/types'
+import type { AccountSummary, Alias, InboxMessage, InboxResult } from '../api/types'
 import AsyncState from '../components/AsyncState'
+import Dialog from '../components/Dialog'
 import { IconKey, IconMail } from '../components/icons'
 
 function formatDate(raw: string): string {
@@ -29,6 +30,7 @@ export default function InboxPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [retryKey, setRetryKey] = useState(0)
+  const [selectedMessage, setSelectedMessage] = useState<InboxMessage | null>(null)
 
   const [searchParams, setSearchParams] = useSearchParams()
   const abortRef = useRef<AbortController | null>(null)
@@ -234,24 +236,28 @@ export default function InboxPage() {
               </span>
             </p>
             <div className="table-wrap">
-              <table>
+              <table className="inbox-table">
                 <thead>
                   <tr>
                     <th>主题</th>
                     <th>发件人</th>
                     <th>收件人</th>
                     <th>日期</th>
-                    <th>摘要</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {result.messages.map((m) => (
                     <tr key={m.id}>
-                      <td>{m.subject || '（无主题）'}</td>
-                      <td>{m.from}</td>
-                      <td>{m.to}</td>
+                      <td><span className="inbox-cell" title={m.subject}>{m.subject || '（无主题）'}</span></td>
+                      <td><span className="inbox-cell" title={m.from}>{m.from}</span></td>
+                      <td><span className="inbox-cell" title={m.to}>{m.to}</span></td>
                       <td>{formatDate(m.date)}</td>
-                      <td>{m.preview}</td>
+                      <td>
+                        <button type="button" className="link-like" onClick={() => setSelectedMessage(m)}>
+                          查看详情
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -260,6 +266,30 @@ export default function InboxPage() {
           </>
         )}
       </AsyncState>
+
+      <Dialog
+        title={selectedMessage?.subject || '（无主题）'}
+        open={selectedMessage !== null}
+        onClose={() => setSelectedMessage(null)}
+        wide
+      >
+        {selectedMessage && (
+          <div className="mail-detail">
+            <dl>
+              <div><dt>发件人</dt><dd>{selectedMessage.from}</dd></div>
+              <div><dt>收件人</dt><dd>{selectedMessage.to}</dd></div>
+              <div><dt>日期</dt><dd>{formatDate(selectedMessage.date)}</dd></div>
+            </dl>
+            <div className="mail-detail-body">
+              <span>邮件内容</span>
+              <pre>{selectedMessage.preview || '（无文本内容）'}</pre>
+            </div>
+            <div className="form-actions">
+              <button type="button" onClick={() => setSelectedMessage(null)}>关闭</button>
+            </div>
+          </div>
+        )}
+      </Dialog>
     </section>
   )
 }

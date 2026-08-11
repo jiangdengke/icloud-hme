@@ -74,6 +74,7 @@ func main() {
 		SecureCookie:            secureCookie,
 		PublicLinkSecret:        publicLinkSecret,
 		GenerationTaskStatePath: filepath.Join(abs, "generation_tasks.json"),
+		AliasExportStatePath:    filepath.Join(abs, "alias_exports.json"),
 	})
 	if err != nil {
 		log.Fatalf("初始化服务失败: %v", err)

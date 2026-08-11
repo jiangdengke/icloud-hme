@@ -5,10 +5,11 @@ interface DialogProps {
   open: boolean
   onClose: () => void
   children: ReactNode
+  wide?: boolean
 }
 
 /** 可访问 Dialog:Escape 关闭、焦点圈定、关闭后回到触发按钮 */
-export default function Dialog({ title, open, onClose, children }: DialogProps) {
+export default function Dialog({ title, open, onClose, children, wide = false }: DialogProps) {
   const ref = useRef<HTMLDivElement>(null)
   const lastFocused = useRef<Element | null>(null)
   const onCloseRef = useRef(onClose)
@@ -69,7 +70,7 @@ export default function Dialog({ title, open, onClose, children }: DialogProps) 
       />
       <div
         ref={ref}
-        className="dialog"
+        className={wide ? 'dialog dialog-wide' : 'dialog'}
         role="dialog"
         aria-modal="true"
         aria-label={title}

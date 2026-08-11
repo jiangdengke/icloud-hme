@@ -2,7 +2,7 @@ import { http, HttpResponse } from 'msw'
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import AliasesPage from './AliasesPage'
 import { server } from '../test/server'
 import { setCSRFToken } from '../api/client'
@@ -84,6 +84,59 @@ describe('AliasesPage', () => {
     server.resetHandlers()
   })
 
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('只导出未导出邮箱并在列表中持久展示状态', async () => {
+    let exportBody: { account_id: string; emails: string[] } | null = null
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:aliases')
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/aliases', () =>
+        HttpResponse.json({
+          success: true,
+          data: {
+            account_id: 'acc_1',
+            count: 2,
+            aliases: [
+              { ...aliases[0], exported: false },
+              { ...aliases[1], exported: true, exportedAt: '2026-08-10T08:00:00Z' },
+            ],
+          },
+        }),
+      ),
+      http.post('/api/aliases/export', async ({ request }) => {
+        exportBody = await request.json() as { account_id: string; emails: string[] }
+        return HttpResponse.json({
+          success: true,
+          data: {
+            account_id: 'acc_1',
+            count: 1,
+            items: [{
+              email: 'alpha@icloud.com',
+              inbox_url: '/mail/token-alpha',
+              exported_at: '2026-08-11T08:00:00Z',
+            }],
+          },
+        })
+      }),
+    )
+    renderPage()
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('button', { name: '导出未导出 (1)' }))
+
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
+    expect(exportBody).toEqual({ account_id: 'acc_1', emails: ['alpha@icloud.com'] })
+    expect(document.querySelectorAll('.badge-info')).toHaveLength(2)
+    expect(screen.getByRole('button', { name: '导出未导出 (0)' })).toBeDisabled()
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:aliases')
+
+  })
+
   it('无账号时显示引导', async () => {
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: [] })),
@@ -153,12 +206,12 @@ describe('AliasesPage', () => {
     expect(screen.getByText('alpha@icloud.com')).toBeInTheDocument()
     expect(screen.queryByText('beta@icloud.com')).toBeNull()
     await user.clear(screen.getByLabelText(/搜索/))
-    await user.selectOptions(screen.getByLabelText(/状态/), 'active')
+    await user.selectOptions(screen.getByLabelText('状态', { exact: true }), 'active')
     expect(screen.getByText('alpha@icloud.com')).toBeInTheDocument()
     expect(screen.queryByText('beta@icloud.com')).toBeNull()
   })
 
-  it('按 邮箱---取件 URL 格式复制单个或全部别名', async () => {
+  it('按 邮箱---取件 URL 格式复制单个别名', async () => {
     server.use(
       http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
       http.get('/api/aliases', () =>
@@ -174,13 +227,6 @@ describe('AliasesPage', () => {
       `alpha@icloud.com---${window.location.origin}/mail/token-alpha`,
     )
 
-    await user.click(screen.getByRole('button', { name: '复制全部' }))
-    expect(await navigator.clipboard.readText()).toBe(
-      [
-        `alpha@icloud.com---${window.location.origin}/mail/token-alpha`,
-        `beta@icloud.com---${window.location.origin}/mail/token-beta`,
-      ].join('\n'),
-    )
   })
 
   it('创建别名:空标签/200 字符边界、成功后刷新并可复制邮箱', async () => {
