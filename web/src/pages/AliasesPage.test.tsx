@@ -126,15 +126,65 @@ describe('AliasesPage', () => {
     )
     renderPage()
     const user = userEvent.setup()
-    await user.click(await screen.findByRole('button', { name: '导出未导出 (1)' }))
+    expect(await screen.findByRole('button', { name: '导出选中 (0)' })).toBeDisabled()
+    await user.click(await screen.findByRole('checkbox', { name: '选择 alpha@icloud.com' }))
+    expect(screen.getByRole('checkbox', { name: '选择 beta@icloud.com' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: '导出选中 (1)' }))
 
     await waitFor(() => expect(click).toHaveBeenCalledTimes(1))
     expect(exportBody).toEqual({ account_id: 'acc_1', emails: ['alpha@icloud.com'] })
     expect(document.querySelectorAll('.badge-info')).toHaveLength(2)
-    expect(screen.getByRole('button', { name: '导出未导出 (0)' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '导出选中 (0)' })).toBeDisabled()
     expect(createObjectURL).toHaveBeenCalledTimes(1)
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:aliases')
 
+  })
+
+  it('别名列表分页并支持跨页累计多选', async () => {
+    const manyAliases: Alias[] = Array.from({ length: 25 }, (_, index) => ({
+      email: `alias-${String(index + 1).padStart(2, '0')}@icloud.com`,
+      anonymousId: `anon_${index + 1}`,
+      label: `Alias ${index + 1}`,
+      active: true,
+      exported: false,
+      createdAt: '2026-08-11T08:00:00Z',
+      inboxUrl: `/mail/token-${index + 1}`,
+    }))
+    server.use(
+      http.get('/api/accounts', () => HttpResponse.json({ success: true, data: accounts })),
+      http.get('/api/aliases', () =>
+        HttpResponse.json({
+          success: true,
+          data: { account_id: 'acc_1', count: manyAliases.length, aliases: manyAliases },
+        }),
+      ),
+    )
+    renderPage()
+    const user = userEvent.setup()
+
+    expect(await screen.findByText('alias-01@icloud.com')).toBeInTheDocument()
+    expect(screen.getByText('alias-20@icloud.com')).toBeInTheDocument()
+    expect(screen.queryByText('alias-21@icloud.com')).toBeNull()
+    expect(screen.getByText('第 1 / 2 页')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('checkbox', { name: '选择 alias-01@icloud.com' }))
+    expect(screen.getByRole('button', { name: '导出选中 (1)' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: '下一页' }))
+
+    expect(screen.getByText('alias-21@icloud.com')).toBeInTheDocument()
+    expect(screen.queryByText('alias-01@icloud.com')).toBeNull()
+    expect(screen.getByText('第 2 / 2 页')).toBeInTheDocument()
+    await user.click(screen.getByRole('checkbox', { name: '选择 alias-21@icloud.com' }))
+    expect(screen.getByRole('button', { name: '导出选中 (2)' })).toBeEnabled()
+
+    await user.selectOptions(screen.getByLabelText('每页'), '10')
+    expect(screen.getByText('第 1 / 3 页')).toBeInTheDocument()
+    expect(screen.getByText('alias-10@icloud.com')).toBeInTheDocument()
+    expect(screen.queryByText('alias-11@icloud.com')).toBeNull()
+    expect(screen.getByRole('button', { name: '导出选中 (2)' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: '清空选择' }))
+    expect(screen.getByRole('button', { name: '导出选中 (0)' })).toBeDisabled()
   })
 
   it('无账号时显示引导', async () => {

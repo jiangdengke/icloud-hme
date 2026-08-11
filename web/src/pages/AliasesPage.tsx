@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { request, ApiError } from '../api/client'
 import type { AccountSummary, Alias, AliasExportResult } from '../api/types'
@@ -41,6 +41,10 @@ export default function AliasesPage() {
   const [busy, setBusy] = useState(false)
   const [actionError, setActionError] = useState('')
   const [exporting, setExporting] = useState(false)
+  const [selectedEmails, setSelectedEmails] = useState<Set<string>>(new Set())
+  const [page, setPage] = useState(1)
+  const [pageSize, setPageSize] = useState(20)
+  const pageSelectionRef = useRef<HTMLInputElement>(null)
 
   const [searchParams, setSearchParams] = useSearchParams()
   const { show } = useToast()
@@ -111,10 +115,30 @@ export default function AliasesPage() {
     })
   }, [aliases, search, filter, exportFilter])
 
-  const pendingExports = useMemo(
-    () => filtered.filter((alias) => alias.inboxUrl && !alias.exported),
-    [filtered],
+  const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize))
+  const currentPage = Math.min(page, totalPages)
+  const pagedAliases = useMemo(
+    () => filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [currentPage, filtered, pageSize],
   )
+  const selectedAliases = useMemo(
+    () => filtered.filter(
+      (alias) => alias.inboxUrl && !alias.exported && selectedEmails.has(alias.email.toLowerCase()),
+    ),
+    [filtered, selectedEmails],
+  )
+  const selectableOnPage = useMemo(
+    () => pagedAliases.filter((alias) => alias.inboxUrl && !alias.exported),
+    [pagedAliases],
+  )
+  const selectedOnPage = selectableOnPage.filter((alias) => selectedEmails.has(alias.email.toLowerCase())).length
+  const allOnPageSelected = selectableOnPage.length > 0 && selectedOnPage === selectableOnPage.length
+
+  useEffect(() => {
+    if (pageSelectionRef.current) {
+      pageSelectionRef.current.indeterminate = selectedOnPage > 0 && !allOnPageSelected
+    }
+  }, [allOnPageSelected, selectedOnPage])
 
   function handleRetry() {
     setLoading(true)
@@ -147,8 +171,8 @@ export default function AliasesPage() {
     [show],
   )
 
-  const exportPendingAliases = useCallback(async () => {
-    if (pendingExports.length === 0 || exporting) return
+  const exportSelectedAliases = useCallback(async () => {
+    if (selectedAliases.length === 0 || exporting) return
     setExporting(true)
     setActionError('')
     try {
@@ -156,7 +180,7 @@ export default function AliasesPage() {
         method: 'POST',
         body: {
           account_id: accountId,
-          emails: pendingExports.map((alias) => alias.email),
+          emails: selectedAliases.map((alias) => alias.email),
         },
       })
       if (data.items.length === 0) {
@@ -183,13 +207,40 @@ export default function AliasesPage() {
         const exportedAt = exported.get(alias.email.toLowerCase())
         return exportedAt ? { ...alias, exported: true, exportedAt } : alias
       }))
+      setSelectedEmails((current) => {
+        const next = new Set(current)
+        data.items.forEach((item) => next.delete(item.email.toLowerCase()))
+        return next
+      })
       show(`已导出 ${data.items.length} 个邮箱，本次不会包含已导出项`)
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : '导出失败，请检查服务状态')
     } finally {
       setExporting(false)
     }
-  }, [accountId, exporting, pendingExports, show])
+  }, [accountId, exporting, selectedAliases, show])
+
+  function toggleAlias(email: string, checked: boolean) {
+    const key = email.toLowerCase()
+    setSelectedEmails((current) => {
+      const next = new Set(current)
+      if (checked) next.add(key)
+      else next.delete(key)
+      return next
+    })
+  }
+
+  function toggleCurrentPage() {
+    setSelectedEmails((current) => {
+      const next = new Set(current)
+      selectableOnPage.forEach((alias) => {
+        const key = alias.email.toLowerCase()
+        if (allOnPageSelected) next.delete(key)
+        else next.add(key)
+      })
+      return next
+    })
+  }
 
   async function runAction(type: 'deactivate' | 'reactivate' | 'delete') {
     if (!confirm) return
@@ -255,6 +306,8 @@ export default function AliasesPage() {
             value={accountId}
             onChange={(e) => {
               setAccountId(e.target.value)
+              setSelectedEmails(new Set())
+              setPage(1)
               setSearchParams({ account_id: e.target.value }, { replace: true })
             }}
             style={{ width: 'auto' }}
@@ -271,11 +324,11 @@ export default function AliasesPage() {
           </button>
           <button
             type="button"
-            onClick={() => void exportPendingAliases()}
-            disabled={pendingExports.length === 0 || exporting}
+            onClick={() => void exportSelectedAliases()}
+            disabled={selectedAliases.length === 0 || exporting}
           >
             <IconDownload size={16} />
-            {exporting ? '导出中' : `导出未导出 (${pendingExports.length})`}
+            {exporting ? '导出中' : `导出选中 (${selectedAliases.length})`}
           </button>
         </div>
       </div>
@@ -288,7 +341,11 @@ export default function AliasesPage() {
               id="alias-search"
               type="search"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value)
+                setSelectedEmails(new Set())
+                setPage(1)
+              }}
               placeholder="按邮箱或标签搜索"
               style={{ paddingRight: 36 }}
             />
@@ -313,7 +370,11 @@ export default function AliasesPage() {
           <select
             id="alias-filter"
             value={filter}
-            onChange={(e) => setFilter(e.target.value as 'all' | 'active' | 'inactive')}
+            onChange={(e) => {
+              setFilter(e.target.value as 'all' | 'active' | 'inactive')
+              setSelectedEmails(new Set())
+              setPage(1)
+            }}
             style={{ width: 'auto' }}
           >
             <option value="all">全部</option>
@@ -326,7 +387,11 @@ export default function AliasesPage() {
           <select
             id="alias-export-filter"
             value={exportFilter}
-            onChange={(e) => setExportFilter(e.target.value as 'all' | 'pending' | 'exported')}
+            onChange={(e) => {
+              setExportFilter(e.target.value as 'all' | 'pending' | 'exported')
+              setSelectedEmails(new Set())
+              setPage(1)
+            }}
             style={{ width: 'auto' }}
           >
             <option value="all">全部</option>
@@ -343,10 +408,30 @@ export default function AliasesPage() {
         emptyText={aliases.length === 0 ? '暂无别名' : '没有匹配的别名'}
         onRetry={handleRetry}
       >
-        <div className="table-wrap">
-          <table>
+        <div className="alias-list">
+          <div className="alias-selection-bar" aria-live="polite">
+            <span>已选择 <strong>{selectedAliases.length}</strong> 个，可跨页选择</span>
+            {selectedAliases.length > 0 && (
+              <button type="button" className="ghost" onClick={() => setSelectedEmails(new Set())}>
+                清空选择
+              </button>
+            )}
+          </div>
+          <div className="table-wrap">
+          <table className="alias-table">
             <thead>
               <tr>
+                <th className="alias-select-cell">
+                  <input
+                    ref={pageSelectionRef}
+                    className="selection-checkbox"
+                    type="checkbox"
+                    checked={allOnPageSelected}
+                    disabled={selectableOnPage.length === 0}
+                    onChange={toggleCurrentPage}
+                    aria-label="选择本页可导出邮箱"
+                  />
+                </th>
                 <th>邮箱</th>
                 <th>标签</th>
                 <th>状态</th>
@@ -356,8 +441,21 @@ export default function AliasesPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((alias) => (
+              {pagedAliases.map((alias) => {
+                const selectable = Boolean(alias.inboxUrl && !alias.exported)
+                return (
                 <tr key={alias.anonymousId}>
+                  <td className="alias-select-cell">
+                    <input
+                      className="selection-checkbox"
+                      type="checkbox"
+                      checked={selectedEmails.has(alias.email.toLowerCase())}
+                      disabled={!selectable}
+                      onChange={(event) => toggleAlias(alias.email, event.target.checked)}
+                      aria-label={`选择 ${alias.email}`}
+                      title={selectable ? '选择导出' : alias.exported ? '该邮箱已导出' : '该邮箱没有取件链接'}
+                    />
+                  </td>
                   <td>
                     <button
                       type="button"
@@ -425,9 +523,39 @@ export default function AliasesPage() {
                     </div>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
+          </div>
+          <div className="alias-pagination">
+            <div className="alias-pagination-summary">
+              共 {filtered.length} 个，第 {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, filtered.length)} 个
+            </div>
+            <div className="alias-pagination-controls">
+              <label htmlFor="alias-page-size">每页</label>
+              <select
+                id="alias-page-size"
+                value={pageSize}
+                onChange={(event) => {
+                  setPageSize(Number(event.target.value))
+                  setPage(1)
+                }}
+              >
+                <option value={10}>10</option>
+                <option value={20}>20</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+              <button type="button" onClick={() => setPage(currentPage - 1)} disabled={currentPage === 1}>
+                上一页
+              </button>
+              <span>第 {currentPage} / {totalPages} 页</span>
+              <button type="button" onClick={() => setPage(currentPage + 1)} disabled={currentPage === totalPages}>
+                下一页
+              </button>
+            </div>
+          </div>
         </div>
       </AsyncState>
 
