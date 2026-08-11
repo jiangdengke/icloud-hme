@@ -786,6 +786,83 @@ td .cell-secondary {
   text-align: left;
 }
 
+.continuous-task-card {
+  margin-top: var(--space-5);
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-raised);
+  box-shadow: var(--shadow-sm);
+}
+
+.continuous-task-heading,
+.continuous-task-results > div {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.continuous-task-heading h3 {
+  margin: var(--space-2) 0 var(--space-1);
+  font-size: var(--text-xl);
+}
+
+.continuous-task-heading p,
+.continuous-task-message {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+}
+
+.continuous-task-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.continuous-task-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+}
+
+.continuous-task-stats > div {
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-bg-subtle);
+}
+
+.continuous-task-stats span,
+.continuous-task-stats strong {
+  display: block;
+}
+
+.continuous-task-stats span {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.continuous-task-stats strong {
+  margin-top: var(--space-1);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.continuous-task-message {
+  margin-top: var(--space-3);
+}
+
+.continuous-task-results {
+  margin-top: var(--space-4);
+}
+
+.continuous-task-results > div {
+  align-items: center;
+}
+
 /* ─── 公开取件页 ─── */
 .public-inbox-page {
   min-height: 100vh;
@@ -958,6 +1035,23 @@ td .cell-secondary {
   .public-message-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .continuous-task-heading,
+  .continuous-task-results > div {
+    flex-direction: column;
+  }
+
+  .continuous-task-actions {
+    width: 100%;
+  }
+
+  .continuous-task-actions button {
+    flex: 1;
+  }
+
+  .continuous-task-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

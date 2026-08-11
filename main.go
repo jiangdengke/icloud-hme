@@ -68,11 +68,12 @@ func main() {
 	}
 
 	srv, err := server.New(mgr, server.Config{
-		Debug:            *debug,
-		AdminPassword:    adminPassword,
-		SessionTTL:       sessionTTL,
-		SecureCookie:     secureCookie,
-		PublicLinkSecret: publicLinkSecret,
+		Debug:                   *debug,
+		AdminPassword:           adminPassword,
+		SessionTTL:              sessionTTL,
+		SecureCookie:            secureCookie,
+		PublicLinkSecret:        publicLinkSecret,
+		GenerationTaskStatePath: filepath.Join(abs, "generation_tasks.json"),
 	})
 	if err != nil {
 		log.Fatalf("初始化服务失败: %v", err)

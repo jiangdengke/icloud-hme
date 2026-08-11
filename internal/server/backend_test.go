@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,11 +19,16 @@ import (
 
 // fakeBackend 是测试用内存 Backend,记录调用,不访问网络。
 type fakeBackend struct {
+	mu           sync.Mutex
 	accounts     []account.Summary
 	aliases      []hme.Alias
 	inbox        InboxResult
 	inboxErr     error
 	created      *hme.CreateResult
+	createCalls  int
+	createLabels []string
+	createSeq    []hme.CreateResult
+	createErrs   []error
 	batchCreated []hme.CreateResult
 	batchErr     error
 	batchAccount string
@@ -108,7 +114,25 @@ func (f *fakeBackend) RemoveAccount(id string) bool {
 }
 
 func (f *fakeBackend) CreateAlias(accountID, label string) (*hme.CreateResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	index := f.createCalls
+	f.createCalls++
+	f.createLabels = append(f.createLabels, label)
+	if index < len(f.createErrs) && f.createErrs[index] != nil {
+		return nil, f.createErrs[index]
+	}
+	if index < len(f.createSeq) {
+		result := f.createSeq[index]
+		return &result, nil
+	}
 	return f.created, nil
+}
+
+func (f *fakeBackend) generationCreateCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.createCalls
 }
 
 func (f *fakeBackend) CreateAliases(accountID, labelPrefix string, count int) ([]hme.CreateResult, error) {

@@ -35,6 +35,11 @@ type Config struct {
 	// PublicLinkSecret 用于签名每个隐藏邮箱的独立取件 URL。
 	// 生产环境由数据目录中的随机密钥文件提供。
 	PublicLinkSecret []byte
+	// GenerationTaskStatePath 保存持续生成任务状态，服务重启后自动恢复。
+	GenerationTaskStatePath string
+	// 以下两个字段只用于测试覆盖默认调度间隔。
+	generationSuccessDelay time.Duration
+	generationFailureDelay []time.Duration
 }
 
 // Server 封装 Gin 引擎、账号后端与认证。
@@ -44,6 +49,7 @@ type Server struct {
 	limiter          *auth.Limiter
 	cfg              Config
 	publicLinkSecret []byte
+	generationTasks  *generationTaskManager
 	r                *gin.Engine
 }
 
@@ -69,6 +75,11 @@ func newWithBackend(be Backend, cfg Config) *Server {
 		cfg:     cfg,
 	}
 	s.publicLinkSecret = normalizePublicLinkSecret(cfg.PublicLinkSecret, cfg.AdminPassword)
+	s.generationTasks = newGenerationTaskManager(be, generationTaskOptions{
+		statePath:     cfg.GenerationTaskStatePath,
+		successDelay:  cfg.generationSuccessDelay,
+		failureDelays: cfg.generationFailureDelay,
+	})
 	s.auth, _ = auth.NewManager(auth.Options{
 		Password: cfg.AdminPassword,
 		TTL:      cfg.SessionTTL,
@@ -118,6 +129,9 @@ func (s *Server) register() {
 			// ===== 核心接口 1: 创建邮箱 =====
 			authed.POST("/create", csrfCheck(s.auth), s.createAliasHandler)
 			authed.POST("/create-batch", csrfCheck(s.auth), s.createAliasesHandler)
+			authed.GET("/generation-task", s.generationTaskStatusHandler)
+			authed.POST("/generation-task/start", csrfCheck(s.auth), s.startGenerationTaskHandler)
+			authed.POST("/generation-task/stop", csrfCheck(s.auth), s.stopGenerationTaskHandler)
 
 			// ===== 核心接口 2: 读取邮件 =====
 			authed.GET("/inbox", s.listInboxHandler)

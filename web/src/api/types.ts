@@ -38,6 +38,34 @@ export interface Alias {
   inboxUrl?: string
 }
 
+/** 创建成功的隐藏邮箱及其独立取件链接 */
+export interface CreatedAlias {
+  email: string
+  label: string
+  created_at: string
+  account_id: string
+  inbox_url?: string
+}
+
+/** 服务器后台持续生成任务状态 */
+export interface GenerationTaskStatus {
+  account_id: string
+  label_prefix: string
+  running: boolean
+  state: 'running' | 'cooldown' | 'stopping' | 'stopped' | string
+  created: number
+  attempts: number
+  failure_count: number
+  consecutive_failures: number
+  started_at?: string
+  updated_at?: string
+  next_run_at?: string
+  last_success_at?: string
+  cooldown_seconds: number
+  message?: string
+  aliases: CreatedAlias[]
+}
+
 /** 邮件摘要 */
 export interface InboxMessage {
   id: string
