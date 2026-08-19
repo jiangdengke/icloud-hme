@@ -266,25 +266,11 @@ func (c *Client) request(method, rawURL string, body any, timeout time.Duration,
 		req.Header.Set("sec-ch-ua-platform", `"Windows"`)
 		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36")
 
-		// 手动添加 Cookie 头（确保跨域也能传递）。沿用浏览器导出的
-		// 原始值；只有 Cookie 本身带双引号时才会包含双引号。
-		if len(c.Cookies) > 0 {
-			cookieParts := make([]string, 0, len(c.Cookies))
-			for k, v := range c.Cookies {
-				cookieParts = append(cookieParts, k+"="+v)
-			}
-			cookieHeader := strings.Join(cookieParts, "; ")
-			req.Header.Set("Cookie", cookieHeader)
-			if c.Verbose {
-				c.log(">>> URL: %s", fullURL)
-				c.log(">>> Cookie names: %d", len(cookieParts))
-				for k, vv := range req.Header {
-					for _, v := range vv {
-						if strings.EqualFold(k, "Cookie") {
-							continue
-						}
-						c.log(">>> %s: %s", k, v[:min(100, len(v))])
-					}
+		if c.Verbose {
+			c.log(">>> URL: %s", fullURL)
+			for k, vv := range req.Header {
+				for _, v := range vv {
+					c.log(">>> %s: %s", k, v[:min(100, len(v))])
 				}
 			}
 		}
@@ -377,7 +363,8 @@ func (c *Client) ValidateSession() error {
 		c.serviceURL = strings.TrimSuffix(c.serviceURL, ":443")
 	}
 
-	// 获取 serviceURL 后，再次设置 Cookie 到该域名
+	// validate 返回动态 maildomainws 域名，CookieJar 不会自动把 setup 域
+	// Cookie 跨域发送，因此在首次业务请求前显式写入该域名。
 	if len(c.Cookies) > 0 {
 		u, _ := url.Parse(c.serviceURL)
 		httpCookies := make([]*http.Cookie, 0, len(c.Cookies))
@@ -388,9 +375,7 @@ func (c *Client) ValidateSession() error {
 				Path:  "/",
 			})
 		}
-		c.httpc.GetCookies(u) // 触发 cookie jar 初始化
-		// 注意：需要手动设置 cookie，但 tls-client 的 CookieJar 不支持直接设置
-		// 我们需要在请求时手动添加 Cookie 头
+		c.httpc.SetCookies(u, httpCookies)
 	}
 
 	dsInfo := data.Get("dsInfo")
