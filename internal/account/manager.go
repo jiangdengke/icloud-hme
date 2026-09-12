@@ -6,6 +6,7 @@ package account
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -44,7 +45,16 @@ type Manager struct {
 	dataDir  string
 	dataFile string
 	imapPool *mail.Pool // IMAP 长连接池
+	loginMu  sync.Mutex // 串行化密码登录与 2FA 会话续接
+	pending  map[string]pendingLogin
 }
+
+type pendingLogin struct {
+	session   *hme.LoginSession
+	createdAt time.Time
+}
+
+const pendingLoginTTL = 10 * time.Minute
 
 // copyAccount 返回账号的深拷贝(含 Cookies map),必须在持锁时调用。
 func copyAccount(acc *Account) *Account {
@@ -71,6 +81,7 @@ func NewManager(dataDir string) (*Manager, error) {
 		dataDir:  dataDir,
 		dataFile: filepath.Join(dataDir, "accounts.json"),
 		imapPool: mail.NewPool(),
+		pending:  make(map[string]pendingLogin),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -83,6 +94,9 @@ func (m *Manager) Close() {
 	if m.imapPool != nil {
 		m.imapPool.Close()
 	}
+	m.loginMu.Lock()
+	m.pending = make(map[string]pendingLogin)
+	m.loginMu.Unlock()
 }
 
 // Reload 重新加载 accounts.json 配置文件。
@@ -460,6 +474,11 @@ func (m *Manager) HMEClient(id string, verbose bool) (*hme.Client, error) {
 // HMEClientWithPassword 为指定账号创建一个新的 HME 客户端,使用账号密码登录。
 // 登录成功后会自动获取 Cookie 并保存到账号配置。
 func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTPProvider) (*hme.Client, error) {
+	// Apple binds the OTP to the session created by StartLogin. Keep the whole
+	// exchange serialized so concurrent requests cannot create duplicate codes.
+	m.loginMu.Lock()
+	defer m.loginMu.Unlock()
+
 	m.mu.RLock()
 	acc, ok := m.accounts[id]
 	var snap *Account
@@ -479,16 +498,64 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 		return nil, fmt.Errorf("账号未设置邮箱地址")
 	}
 
+	if pending, ok := m.pending[id]; ok {
+		if time.Since(pending.createdAt) <= pendingLoginTTL {
+			if otpProvider == nil {
+				return nil, hme.ErrOTPRequired
+			}
+			err := pending.session.ContinueOTPProvider(otpProvider)
+			if err == nil {
+				delete(m.pending, id)
+				client := pending.session.Client()
+				m.saveLoggedInClient(id, client)
+				return client, nil
+			}
+			// Keep the session after an invalid code so a retry does not issue
+			// another Apple challenge. Drop it only when the session is unusable.
+			if strings.Contains(err.Error(), "2FA 验证失败") {
+				return nil, err
+			}
+			delete(m.pending, id)
+			return nil, err
+		}
+		delete(m.pending, id)
+	}
+
 	client, err := hme.NewClient(nil, snap.Host, snap.Proxy, true)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := client.Login(email, password, otpProvider); err != nil {
+	session, err := client.StartLogin(email, password)
+	if err != nil {
+		if errors.Is(err, hme.ErrOTPRequired) && session != nil {
+			m.pending[id] = pendingLogin{session: session, createdAt: time.Now()}
+			if otpProvider == nil {
+				return nil, err
+			}
+			if continueErr := session.ContinueOTPProvider(otpProvider); continueErr != nil {
+				if !strings.Contains(continueErr.Error(), "2FA 验证失败") {
+					delete(m.pending, id)
+				}
+				return nil, continueErr
+			}
+			delete(m.pending, id)
+			m.saveLoggedInClient(id, client)
+			return client, nil
+		}
 		return nil, err
 	}
 
-	// 保存登录后的 Cookie 到账号(网络完成后重新加锁,以 id 查找当前对象写回)
+	if err := session.Finish(); err != nil {
+		return nil, err
+	}
+	m.saveLoggedInClient(id, client)
+	return client, nil
+}
+
+// saveLoggedInClient persists cookies after a successful password login. The
+// caller holds loginMu but must not hold m.mu.
+func (m *Manager) saveLoggedInClient(id string, client *hme.Client) {
 	m.mu.Lock()
 	if cur, ok := m.accounts[id]; ok {
 		cur.Cookies = client.Cookies
@@ -498,8 +565,6 @@ func (m *Manager) HMEClientWithPassword(id, password string, otpProvider hme.OTP
 		m.save()
 	}
 	m.mu.Unlock()
-
-	return client, nil
 }
 
 // MailClient 为指定账号创建 IMAP 邮件客户端(每次新建, 不走连接池)。

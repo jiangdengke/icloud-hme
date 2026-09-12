@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -28,10 +29,78 @@ const appleFDClientInfo = `{"U":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Apple
 // OTPProvider 双重认证回调函数,返回 2FA 验证码
 type OTPProvider func() (string, error)
 
+// ErrOTPRequired indicates that Apple has created a 2FA challenge and the
+// caller should collect a code before continuing the same login session.
+var ErrOTPRequired = errors.New("账号启用了双重认证,需要提供 OTP")
+
+// LoginSession contains the state Apple issued between SRP authentication and
+// OTP verification. It must be continued instead of starting Login again.
+type LoginSession struct {
+	client *Client
+	state  *authState
+}
+
+// Client returns the client associated with this login session.
+func (s *LoginSession) Client() *Client {
+	if s == nil {
+		return nil
+	}
+	return s.client
+}
+
+// Finish completes a login that did not require OTP and stores its cookies.
+func (s *LoginSession) Finish() error {
+	if s == nil || s.client == nil || s.state == nil {
+		return fmt.Errorf("登录会话无效")
+	}
+
+	c := s.client
+	state := s.state
+	c.log("认证步骤 5/6: trust")
+	if err := c.getTrust(state); err != nil {
+		c.log("认证失败: trust: %v", err)
+		return fmt.Errorf("get trust: %w", err)
+	}
+
+	c.log("认证步骤 6/6: account-login")
+	if err := c.authenticateWeb(state); err != nil {
+		c.log("认证失败: account-login: %v", err)
+		return fmt.Errorf("authenticate web: %w", err)
+	}
+
+	cookies := c.extractSessionCookies()
+	c.Cookies = cookies
+	c.log("登录成功,获取到 %d 个 Cookie", len(cookies))
+	return nil
+}
+
+// ContinueOTP verifies a code against the existing Apple 2FA challenge and
+// then finishes the login session.
+func (s *LoginSession) ContinueOTP(otp string) error {
+	if s == nil || s.client == nil || s.state == nil {
+		return fmt.Errorf("登录会话无效")
+	}
+	if err := s.client.verifyTwoFactor(s.state, otp); err != nil {
+		return err
+	}
+	return s.Finish()
+}
+
+// ContinueOTPProvider obtains a code and continues the existing session.
+func (s *LoginSession) ContinueOTPProvider(provider OTPProvider) error {
+	if provider == nil {
+		return ErrOTPRequired
+	}
+	otp, err := provider()
+	if err != nil {
+		return fmt.Errorf("获取 2FA 验证码失败: %w", err)
+	}
+	return s.ContinueOTP(otp)
+}
+
 // authState 保存认证过程中的状态
 type authState struct {
 	username       string
-	password       string
 	frameId        string
 	clientId       string
 	authAttr       string
@@ -72,23 +141,39 @@ func (c *Client) authWebURL() string {
 // 登录成功后,可以通过 client.GetCookies() 获取 Cookie。
 // 启用 2FA 时,会调用 otpProvider 获取验证码。
 func (c *Client) Login(username, password string, otpProvider OTPProvider) error {
+	session, err := c.StartLogin(username, password)
+	if err != nil {
+		if errors.Is(err, ErrOTPRequired) && otpProvider != nil {
+			if continueErr := session.ContinueOTPProvider(otpProvider); continueErr != nil {
+				return fmt.Errorf("auth complete: %w", continueErr)
+			}
+			return nil
+		}
+		return err
+	}
+	return session.Finish()
+}
+
+// StartLogin performs the password/SRP portion of login once. When 2FA is
+// enabled it returns the live session together with ErrOTPRequired.
+func (c *Client) StartLogin(username, password string) (*LoginSession, error) {
 	state := &authState{
 		username: username,
-		password: password,
 	}
+	session := &LoginSession{client: c, state: state}
 
 	// 1. 初始化 frameId 和 clientId
 	c.log("认证步骤 1/6: auth-start (%s)", c.Host)
 	if err := c.authStart(state); err != nil {
 		c.log("认证失败: auth-start: %v", err)
-		return fmt.Errorf("auth start: %w", err)
+		return nil, fmt.Errorf("auth start: %w", err)
 	}
 
 	// 2. 提交用户名
 	c.log("认证步骤 2/6: auth-federate")
 	if err := c.authFederate(state); err != nil {
 		c.log("认证失败: auth-federate: %v", err)
-		return fmt.Errorf("auth federate: %w", err)
+		return nil, fmt.Errorf("auth federate: %w", err)
 	}
 
 	// 3. SRP 协议初始化
@@ -101,17 +186,17 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 	authInitResp, err := c.authInit(state, base64.StdEncoding.EncodeToString(srpClient.GetABytes()))
 	if err != nil {
 		c.log("认证失败: auth-init: %v", err)
-		return fmt.Errorf("auth init: %w", err)
+		return nil, fmt.Errorf("auth init: %w", err)
 	}
 
 	// 5. 解码 salt 和 B
 	bDec, err := base64.StdEncoding.DecodeString(authInitResp.B)
 	if err != nil {
-		return fmt.Errorf("decode B: %w", err)
+		return nil, fmt.Errorf("decode B: %w", err)
 	}
 	saltDec, err := base64.StdEncoding.DecodeString(authInitResp.Salt)
 	if err != nil {
-		return fmt.Errorf("decode salt: %w", err)
+		return nil, fmt.Errorf("decode salt: %w", err)
 	}
 
 	// 6. 生成密码密钥
@@ -123,30 +208,11 @@ func (c *Client) Login(username, password string, otpProvider OTPProvider) error
 
 	// 8. 提交 SRP 响应 (可能触发 2FA)
 	c.log("认证步骤 4/6: auth-complete")
-	if err := c.authComplete(state, authInitResp.C, base64.StdEncoding.EncodeToString(srpClient.M1), base64.StdEncoding.EncodeToString(srpClient.M2), otpProvider); err != nil {
+	if err := c.authComplete(state, authInitResp.C, base64.StdEncoding.EncodeToString(srpClient.M1), base64.StdEncoding.EncodeToString(srpClient.M2), nil); err != nil {
 		c.log("认证失败: auth-complete: %v", err)
-		return fmt.Errorf("auth complete: %w", err)
+		return session, fmt.Errorf("auth complete: %w", err)
 	}
-
-	// 9. 信任设备
-	c.log("认证步骤 5/6: trust")
-	if err := c.getTrust(state); err != nil {
-		c.log("认证失败: trust: %v", err)
-		return fmt.Errorf("get trust: %w", err)
-	}
-
-	// 10. 获取 iCloud Web 服务 Cookie
-	c.log("认证步骤 6/6: account-login")
-	if err := c.authenticateWeb(state); err != nil {
-		c.log("认证失败: account-login: %v", err)
-		return fmt.Errorf("authenticate web: %w", err)
-	}
-
-	// 11. 保存 Cookie 到 Client
-	cookies := c.extractSessionCookies()
-	c.Cookies = cookies
-	c.log("登录成功,获取到 %d 个 Cookie", len(cookies))
-	return nil
+	return session, nil
 }
 
 // --- 认证流程的各步骤 ---
@@ -321,7 +387,7 @@ func (c *Client) handleTwoFactor(state *authState, signinResp *http.Response, ot
 	}
 
 	if otpProvider == nil {
-		return fmt.Errorf("账号启用了双重认证,需要提供 OTP")
+		return ErrOTPRequired
 	}
 
 	otp, err := otpProvider()
@@ -329,7 +395,11 @@ func (c *Client) handleTwoFactor(state *authState, signinResp *http.Response, ot
 		return fmt.Errorf("获取 2FA 验证码失败: %w", err)
 	}
 
-	// 提交 2FA 验证码
+	return c.verifyTwoFactor(state, otp)
+}
+
+// verifyTwoFactor submits a code to the already prepared Apple challenge.
+func (c *Client) verifyTwoFactor(state *authState, otp string) error {
 	reqBody := map[string]interface{}{
 		"securityCode": map[string]string{"code": otp},
 	}
