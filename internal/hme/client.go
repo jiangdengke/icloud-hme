@@ -101,6 +101,9 @@ func NewClient(cookies map[string]string, host, proxy string, verbose bool) (*Cl
 	// 添加代理支持
 	if proxy != "" {
 		options = append(options, tls_client.WithProxyUrl(proxy))
+		// HTTP CONNECT 代理只转发 TCP，禁用 HTTP/3/QUIC，避免 TLS
+		// 客户端在代理链路上探测 QUIC 后出现 EOF。
+		options = append(options, tls_client.WithDisableHttp3())
 	}
 
 	httpc, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(), options...)
