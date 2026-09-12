@@ -313,7 +313,7 @@ func (c *Client) handleTwoFactor(state *authState, signinResp *http.Response, ot
 		return err
 	}
 	defer optionsResp.Body.Close()
-	if optionsResp.StatusCode != 200 {
+	if optionsResp.StatusCode < 200 || optionsResp.StatusCode >= 300 {
 		return fmt.Errorf("获取双重认证选项失败: HTTP %d", optionsResp.StatusCode)
 	}
 	if newScnt := optionsResp.Header.Get("scnt"); newScnt != "" {
