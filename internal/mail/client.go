@@ -67,16 +67,34 @@ func (c *Client) Connect() error {
 		c.forceClose()
 	}
 	addr := fmt.Sprintf("%s:%d", IMAPServer, IMAPPort)
-	cli, err := client.DialTLS(addr, nil)
-	if err != nil {
-		return fmt.Errorf("IMAP 连接失败: %w", err)
+	usernames := imapUsernames(c.appleID)
+	var lastErr error
+	for _, username := range usernames {
+		cli, err := client.DialTLS(addr, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if err := cli.Login(username, c.appPassword); err == nil {
+			c.cli = cli
+			return nil
+		} else {
+			lastErr = err
+			_ = cli.Logout()
+		}
 	}
-	if err := cli.Login(c.appleID, c.appPassword); err != nil {
-		_ = cli.Logout()
-		return fmt.Errorf("IMAP 登录失败 — 请检查: 1) 应用专用密码是否正确 2) Apple ID: %s — %w", c.appleID, err)
+	return fmt.Errorf("IMAP 登录失败 — 请检查: 1) 应用专用密码是否正确 2) Apple ID: %s — %w", c.appleID, lastErr)
+}
+
+func imapUsernames(email string) []string {
+	email = strings.TrimSpace(email)
+	if at := strings.IndexByte(email, '@'); at > 0 {
+		local := email[:at]
+		if local != email {
+			return []string{local, email}
+		}
 	}
-	c.cli = cli
-	return nil
+	return []string{email}
 }
 
 // Ping 探测连接是否仍可用(NOOP)。

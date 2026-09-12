@@ -77,3 +77,13 @@ func TestNormalizePreviewLimitsRunes(t *testing.T) {
 		t.Fatalf("摘要长度错误: %d", got)
 	}
 }
+
+func TestIMAPUsernamesPrefersLocalPart(t *testing.T) {
+	got := imapUsernames("user@icloud.com")
+	if len(got) != 2 || got[0] != "user" || got[1] != "user@icloud.com" {
+		t.Fatalf("IMAP 用户名回退顺序错误: %#v", got)
+	}
+	if got := imapUsernames("user"); len(got) != 1 || got[0] != "user" {
+		t.Fatalf("无域名用户名处理错误: %#v", got)
+	}
+}
